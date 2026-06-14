@@ -5,11 +5,13 @@ Operational guide for AI agents working on this repo. User-facing overview is in
 
 ## What this is
 
-A pure-bash + launchd watchdog for the claude-mem plugin, plus one small
-OpenClaw hook (`openclaw/decision-bridge/handler.mjs`) that turns Telegram
-`approve <id>` / `deny <id>` replies into decision files. Language is **bash on
+A pure-bash + launchd watchdog for the claude-mem plugin. Language is **bash on
 purpose** (not the usual TS default): the job is entirely `curl`/`sqlite3`/
-`pkill`/`openclaw`, and a watchdog must not fail for its own reasons.
+`pkill`/`openclaw`, and a watchdog must not fail for its own reasons. The
+launchd auto-fix watchdog is the working core and needs no OpenClaw.
+
+A Telegram approve/deny **bridge is PARKED** (`openclaw/plugin/`, not installed by
+`install.sh`) — see beads `cc-recall-mfr` and the gotchas below.
 
 ## Hard-won gotchas (do not relearn these)
 
@@ -17,24 +19,32 @@ purpose** (not the usual TS default): the job is entirely `curl`/`sqlite3`/
   the first `}` closes the expansion and the second becomes a literal, so
   `"${3:-{}}"` yields `$3` + a stray `}`, corrupting JSON passed to
   `jq --argjson`. Always use `local x="${3:-}"; [ -n "$x" ] || x='{}'`.
-- **OpenClaw internal hook event name is `message`, not `message_received`.**
-  Inbound dispatch calls `createInternalHookEvent("message","received",…)` →
-  event `{type:"message", action:"received", context:{…}}`. `message_received`
-  is the *plugin* hook name. Register `{event:"message"}` and gate on
-  `event.action === "received"`.
-- **Hook module path must be workspace-relative**, resolved against
-  `~/.openclaw/workspace` (NOT `~/.openclaw` or the agent dir). Absolute paths
-  are rejected. The handler lives at
-  `~/.openclaw/workspace/hooks/handlers/claude-mem-decision-bridge.mjs`,
-  registered as `./hooks/handlers/claude-mem-decision-bridge.mjs`. Use `.mjs`
-  to avoid the `MODULE_TYPELESS_PACKAGE_JSON` warning.
+- **The approval bridge is PARKED — build it on `openclaw --dev`, never the live
+  gateway.** The intended design is an OpenClaw `inbound_claim` *plugin* hook that
+  returns `{handled:true}` to claim `approve/deny <id>` replies BEFORE agent
+  dispatch, so the agent never sees them. Hard-won plugin gotchas:
+  - **Internal hooks can't claim.** A legacy internal `message:received` handler
+    (`hooks.internal.handlers`, event `message`/action `received`) is fire-and-forget
+    — it writes a decision but can't stop the agent from also replying. Hence a
+    *plugin* `inbound_claim` hook (this is why the original handler.mjs was dropped).
+  - **`definePluginEntry` is on `openclaw/plugin-sdk/core`**, NOT `openclaw/plugin-sdk`
+    (its index doesn't re-export it → `undefined`/"not a function"). A plain-object
+    export loads without error but the loader never wires its `register()`, so the
+    hook silently never fires — the `definePluginEntry` wrapper is required.
+  - **Plugin packaging:** `openclaw plugins install <dir>` needs `package.json` with
+    `openclaw.extensions:["./index.js"]` + `openclaw.plugin.json` with a `configSchema`.
+  - **`plugins.allow` is an EXCLUSIVE allowlist** — setting it (even to `[]`) drops
+    every plugin not listed (this cut the live set ~10 → 3). Leave the key absent.
+  - The `inbound_claim` event exposes `event.channel` (not `channelId`), `.content`,
+    `.senderId`, `.conversationId`. Owner Telegram chat id = `1802148062`.
 - **`openclaw message read` does not support Telegram** (Discord/Slack/Matrix
   only). That's why we use a hook (push) for replies, not polling reads.
 - **`openclaw message send` JSON shape** is `.payload.ok` / `.payload.messageId`
   / `.payload.chatId` — NOT `.payload.result.messageId`.
-- **Owner Telegram id is self-bootstrapped** by the bridge from any inbound
+- **Owner Telegram id is self-bootstrapped** by the (parked) bridge from any inbound
   message → `owner.json` (`telegram:<id>`; strip the prefix for `--target`).
-  `openclaw directory self --channel telegram` returns null under pairing mode.
+  `openclaw directory self --channel telegram` returns null under pairing mode, so
+  there's no clean lookup — capture it from an inbound message instead.
 - **The CLI `sqlite3` lacks the FTS5 module.** Safe for `PRAGMA`, `VACUUM`, and
   `DELETE FROM pending_messages` (no FTS triggers). NEVER `DELETE FROM
   observations`/`session_summaries` via the CLI — those fire FTS triggers and
@@ -45,11 +55,12 @@ purpose** (not the usual TS default): the job is entirely `curl`/`sqlite3`/
 ## Editing
 
 - All thresholds live in `etc/watchdog.conf`. Don't hardcode in scripts.
-- After editing the bridge handler, copy it into the workspace and
-  `openclaw gateway restart` (or re-run `./install.sh`). Confirm it loaded:
-  `grep 'loaded .* internal hook' ~/.openclaw/logs/gateway.log` (count should
-  include ours) and no `could not be resolved with realpath`.
 - Syntax-check: `bash -n bin/*.sh`. Test ticks directly: `bash bin/watchdog-light.sh`.
+- `install.sh` installs ONLY the launchd jobs (no OpenClaw changes). `uninstall.sh`
+  removes them. Neither touches the gateway while the bridge is parked.
+- Reviving the bridge: work in an isolated `openclaw --dev` profile (state under
+  `~/.openclaw-dev`, separate port). Prove the `inbound_claim` claim end-to-end
+  there before ever installing against the live gateway.
 
 ## Origin
 

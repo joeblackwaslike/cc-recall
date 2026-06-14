@@ -3,6 +3,14 @@
 A launchd watchdog that keeps [claude-mem](https://github.com/thedotmack/claude-mem)
 healthy and stops it from silently failing into a multi-gigabyte database.
 
+> **Status:** the **launchd auto-fix watchdog is live and self-sufficient** — it
+> needs nothing else. The **Telegram approve/deny bridge is PARKED** (design below,
+> seed in `openclaw/plugin/`): the `inbound_claim` claim plugin is not yet proven
+> and `install.sh` does **not** install it or touch your OpenClaw gateway. Reviving
+> it is tracked in beads `cc-recall-mfr` (build + prove on an isolated `openclaw
+> --dev` profile first). Until then, escalations are **notify-only** — the watchdog
+> DMs you; you act manually.
+
 ## Why
 
 On 2026-06-14, claude-mem had silently broken weeks earlier: a stale
@@ -13,11 +21,13 @@ forced a look. Every failure mode was *mechanical and detectable*. This
 watchdog watches those signals, auto-fixes the safe ones, and asks for approval
 over Telegram before doing anything destructive.
 
-## Architecture — who listens vs. who acts
+## Architecture — who listens vs. who acts (the parked bridge design)
 
-A periodic shell script can *send* a Telegram message but can't *listen* for a
-reply. So the watchdog **never listens** — the listening is delegated to
-OpenClaw's always-on Gateway, and the two sides rendezvous through files:
+The auto-fixes need none of this. This is the **intended** approve/deny design,
+currently parked (see Status). A periodic shell script can *send* a Telegram
+message but can't *listen* for a reply. So the watchdog **never listens** — the
+listening is delegated to OpenClaw's always-on Gateway via a claim plugin, and the
+two sides rendezvous through files:
 
 ```
                               ~/.claude-mem-watchdog/
@@ -46,7 +56,7 @@ OpenClaw's always-on Gateway, and the two sides rendezvous through files:
 | `bin/watchdog-audit.sh` | ~6 h: DB bloat / queue / disk audit, auto-VACUUM + prune, **raises approval requests** |
 | `bin/lib.sh` | shared: logging, notify, DB PRAGMA, request/decision lifecycle, circuit breaker |
 | `etc/watchdog.conf` | all thresholds and paths |
-| `openclaw/decision-bridge/handler.mjs` | OpenClaw `message_received` hook — the Telegram listener |
+| `openclaw/plugin/` | **(parked)** seed for the OpenClaw `inbound_claim` claim plugin — the Telegram listener, to be proven on `--dev` (see `cc-recall-mfr`) |
 | `launchd/com.claudemem.watchdog-{light,audit}.plist` | the two scheduled jobs |
 
 ## Autonomy boundary
@@ -62,16 +72,16 @@ that fails ≥ `CIRCUIT_BREAKER_FAILS` times in a row.
 ## Install
 
 ```sh
-./install.sh
-# then DM your OpenClaw Telegram bot once so the bridge bootstraps your chat id
+./install.sh                                                       # launchd jobs only; no gateway changes
 launchctl list | grep claudemem
 launchctl kickstart -k gui/$(id -u)/com.claudemem.watchdog-audit   # force a run
 tail -f ~/.claude-mem-watchdog/incidents.jsonl
 ```
 
-`./uninstall.sh` removes the launchd jobs and de-registers the bridge
-(`--purge` also deletes state). The owner Telegram id is **self-bootstrapped**
-by the bridge from your first inbound message — nothing to hardcode.
+`./uninstall.sh` removes the launchd jobs (`--purge` also deletes state). Neither
+script touches OpenClaw while the bridge is parked. For notify-only escalations,
+`owner.json` must exist (the parked bridge would self-bootstrap it; until then set
+it manually — see `install.sh` output).
 
 ## State & logs (`~/.claude-mem-watchdog/`)
 
@@ -83,6 +93,8 @@ by the bridge from your first inbound message — nothing to hardcode.
 
 ## Requirements
 
-macOS · `bash` · `jq` · `sqlite3` · `curl` · a running OpenClaw Gateway with a
-connected Telegram channel · claude-mem installed under
-`~/.claude/plugins/cache/thedotmack/claude-mem`.
+**Core watchdog:** macOS · `bash` · `jq` · `sqlite3` · `curl` · claude-mem installed
+under `~/.claude/plugins/cache/thedotmack/claude-mem`.
+
+**Only for notifications / the (parked) approval bridge:** a running OpenClaw Gateway
+with a connected Telegram channel.
