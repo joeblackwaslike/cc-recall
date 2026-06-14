@@ -6,11 +6,33 @@
 
 ---
 
+> ### ⬛ Revision — review & sign off (2026-06-14b)
+> Changes in this pass, for quick review:
+> 1. **Verified corpus numbers** (§1): **15,154** sessions / 149 projects; only **356 (2.3%) titled**, **14,798 (97.7%) untitled** — the headline problem is *missing titles*, not just drift.
+> 2. **`/recall:doctor`** command — reclassifies the old `verify`: runs the claude-mem **G0** check + sidecar integrity + backfill coverage % + surface health, and suggests fixes.
+> 3. **Skill renamed** `cc-recall` → **`using-cc-recall`** (matches the `using-superpowers` / `using-serena` convention).
+> 4. **`src/types.ts`** added (§6) — shared domain types (was an omission); `record/schema.ts` keeps the `RecallRecord` + zod schema.
+
+---
+
 ## 1. Problem
 
 Claude Code writes every session to a `.jsonl` transcript under `~/.claude/projects/<encoded-cwd>/`.
-There are ~15,000 of them across 149 projects on this machine alone. They are indexed for human
-retrieval by only three things: **ai-title, first user message, and recency (mtime)**.
+There are **15,154** of them across **149** projects on this machine alone. They are indexed for
+human retrieval by only three things: **ai-title, first user message, and recency (mtime)**.
+
+**Measured discoverability (2026-06-14):**
+
+| | Count | Share |
+|---|---|---|
+| Sessions with a title (discoverable by browsing) | 356 | **2.3%** |
+| Sessions with no title (undiscoverable) | 14,798 | **97.7%** |
+| **Total** | **15,154** | 100% |
+
+The headline is not subtle: **97.7% of sessions have no title at all** — they surface in the picker
+only by first message and recency, which is pure roulette. (`ai-title` appears to be a recent
+feature, so the entire back-catalog is untitled — precisely what backfill exists to fix.) Titles
+that *do* exist are often mislabeled by drift, so even the 2.3% overstates true discoverability.
 
 Consequences, all observed in practice:
 
@@ -48,7 +70,7 @@ server are all first-class plugin components wired through the manifest.
 
 ## 5. Architecture
 
-```
+```text
                         ┌─────────────────────────────────────────────┐
    new session ends ──► │  SessionEnd hook  ─┐                          │
                         │                     ├─► cc-recall index <id>   │
@@ -84,18 +106,19 @@ secondary and optional; a failure in either never breaks the system.**
 
 ## 6. Components (code layout)
 
-```
+```text
 cc-recall/
   .claude-plugin/plugin.json     # Claude Code plugin manifest (canonical location)
-  commands/                      # /recall:search, /recall:backfill, /recall:status, /recall:lineage, /recall:verify
-  skills/cc-recall/SKILL.md      # thin "how to find a past session" skill
+  commands/                      # /recall:search, /recall:backfill, /recall:status, /recall:lineage, /recall:doctor
+  skills/using-cc-recall/SKILL.md# thin "how to find a past session" skill
   hooks/
     hooks.json                   # SessionEnd + UserPromptSubmit registration
     session-end.mjs              # forward capture → cc-recall index
     prompt-submit.mjs            # adoption reminder
   src/
+    types.ts                     # shared domain types (transcript-record union, tool-call, handoff)
     transcript/parse.ts          # JSONL reader, record-type model, cwd/title/timestamps
-    record/schema.ts             # Record type + zod schema + schema_version
+    record/schema.ts             # RecallRecord type + zod schema + schema_version
     record/synthesizer.ts        # transcript → Record (shared by forward + backfill)
     surfaces/sidecar.ts          # SQLite read/write (PRIMARY)
     surfaces/transcript-writer.ts# edit-in-place: backup, inject record, rewrite title, integrity, revert
@@ -200,8 +223,9 @@ storage, to avoid bloating auto-injected context.
 |------|------------------|
 | forward capture | `hooks/hooks.json` → `SessionEnd` |
 | adoption reminder | `hooks/hooks.json` → `UserPromptSubmit` |
-| manual ops | `commands/` → `/recall:search`, `/recall:backfill`, `/recall:status`, `/recall:lineage`, `/recall:verify` |
-| "how to find a session" guidance | `skills/cc-recall/SKILL.md` |
+| manual ops | `commands/` → `/recall:search`, `/recall:backfill`, `/recall:status`, `/recall:lineage` |
+| health & diagnostics | `commands/` → `/recall:doctor` (G0 claude-mem check + sidecar integrity + coverage % + fix suggestions) |
+| "how to find a session" guidance | `skills/using-cc-recall/SKILL.md` |
 | cross-tool retrieval (future) | optional MCP server exposing `search`/`lineage` |
 
 **Manifest** — `.claude-plugin/plugin.json` (root `plugin.json` is ignored by Claude Code):
@@ -230,7 +254,7 @@ storage, to avoid bloating auto-injected context.
 ```
 
 **One-liner install:**
-```
+```text
 /plugin marketplace add joeblackwaslike/agent-marketplace
 /plugin install cc-recall@agent-marketplace
 ```
@@ -248,7 +272,7 @@ and splitting adds significant synthesis complexity. Revisit after v1 retrieval 
 
 ## 12. Gates & blockers
 
-- **G0 — claude-mem verification (BLOCKER for surface ③):** `cc-recall verify` exercises claude-mem
+- **G0 — claude-mem verification (BLOCKER for surface ③):** `cc-recall doctor` exercises claude-mem
   end-to-end (observation generation, search, retrieval round-trip) and reports pass/fail. No
   claude-mem-dependent code path is enabled until G0 is green. Rationale: claude-mem was recently
   repaired; we will not build a cascade of dependencies on an unverified component.
@@ -273,7 +297,7 @@ and splitting adds significant synthesis complexity. Revisit after v1 retrieval 
 - **Backfill:** run on a small fixture dir; assert idempotency (second run = no-ops).
 - **Hooks:** SessionEnd produces a record; UserPromptSubmit injects reminder on intent, stays silent
   otherwise.
-- **G0:** the verify command itself is the claude-mem acceptance test.
+- **G0:** the `doctor` command itself is the claude-mem acceptance test.
 
 ## 15. Rollout phases
 
