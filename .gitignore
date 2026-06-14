@@ -1,7 +1,27 @@
-/node_modules
-/dist
+# Editor / OS
 *.tsbuildinfo
 .DS_Store
+
+# Build / deps
+/dist
+dist/
+build/
+/node_modules
+node_modules/
+coverage/
+.cache/
+.turbo/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Docusaurus / generated docs
+.docusaurus/
+docs/api/
+docs/backlog.md
+docs/handoff.md
 
 # Beads / Dolt files (added by bd init)
 .dolt/
