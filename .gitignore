@@ -1,4 +1,20 @@
-/node_modules
-/dist
+
+# Docusaurus generated files
+# Personal scratchpad (not for version control)
 *.tsbuildinfo
 .DS_Store
+.cache/
+.docusaurus/
+.env
+.env.*.local
+.env.local
+.turbo/
+/dist
+/node_modules
+build/
+coverage/
+dist/
+docs/api/
+docs/backlog.md
+docs/handoff.md
+node_modules/

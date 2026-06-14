@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "biomejs.biome",
+    "dbaeumer.vscode-eslint",
+    "EditorConfig.EditorConfig",
+    "github.vscode-github-actions",
+    "ms-vscode.vscode-typescript-next",
+    "yoavbls.pretty-ts-errors",
+    "Anthropic.claude-code"
+  ]
+}
