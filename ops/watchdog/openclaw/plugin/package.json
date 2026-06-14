@@ -1,0 +1,8 @@
+{
+  "name": "claude-mem-watchdog",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "index.js",
+  "private": true,
+  "openclaw": { "extensions": ["./index.js"] }
+}

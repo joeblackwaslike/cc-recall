@@ -1,0 +1,7 @@
+{
+  "id": "claude-mem-watchdog",
+  "name": "claude-mem watchdog bridge",
+  "description": "Claims Telegram approve/deny <id> replies for the claude-mem watchdog so the OpenClaw agent ignores them; self-bootstraps the owner chat id.",
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}
