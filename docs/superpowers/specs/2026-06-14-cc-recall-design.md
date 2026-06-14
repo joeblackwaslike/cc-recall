@@ -12,6 +12,8 @@
 > 2. **`/recall:doctor`** command — reclassifies the old `verify`: runs the claude-mem **G0** check + sidecar integrity + backfill coverage % + surface health, and suggests fixes.
 > 3. **Skill renamed** `cc-recall` → **`using-cc-recall`** (matches the `using-superpowers` / `using-serena` convention).
 > 4. **`src/types.ts`** added (§6) — shared domain types (was an omission); `record/schema.ts` keeps the `RecallRecord` + zod schema.
+> 5. **Home-path normalization → new Phase 0 (§P0):** **11,557 sessions (76%)** sit under dead `-Users-joeblack-*` slugs; consolidate to `-Users-joe-*` (with merges) *before* backfill. New `/recall:migrate` command + `src/migrate/`.
+> 6. **Upstream issue (§U0):** S0 now also attributes *where* the no-title deficiency originates (CLI core vs extension), and we file a detailed issue at `anthropics/claude-code`.
 
 ---
 
@@ -61,6 +63,35 @@ to multiple surfaces, with retrieval that an agent is *guaranteed* to use.
   a dedicated `find-session` tool **if** the reminder-driven approach measurably underperforms (§9).
 - Pseudo-session splitting is **future** (§11), not v1.
 
+## P0. Home-path normalization — runs first (prerequisite to backfill)
+
+Joe's home moved **`/Users/joeblack` → `/Users/joe`**; the old path no longer exists on disk.
+Because `~/.claude/projects/` dirs are slugged from cwd, this fragmented the corpus:
+
+| | Count |
+|---|---|
+| Sessions under dead `-Users-joeblack-*` slugs | **11,557 (76% of all sessions)** |
+| Old-home project dirs | 33 |
+| Projects existing under **both** homes (need merge) | 16+ |
+
+Those 11,557 sessions are **invisible from every working directory in use today**, because the
+picker keys off the live cwd slug. Normalization is a **prerequisite to backfill** — we consolidate
+identity before synthesizing records and lineage, or every cross-home project's history computes as
+two disconnected halves.
+
+Two layers, both reusing the edit-in-place safety machinery (§13):
+
+1. **Directory slug:** `-Users-joeblack-<rest>` → `-Users-joe-<rest>`. On collision with an existing
+   new-home dir, **merge** by moving session files in — UUIDs are unique so no filename clash, but
+   verify before each move. Includes non-github prefixes (`-Users-joeblack-projects-*`,
+   `-Users-joeblack-Library-*`, bare `-Users-joeblack`).
+2. **In-transcript paths:** rewrite `cwd` (and path fields in records) `/Users/joeblack/...` →
+   `/Users/joe/...` so tools reading cwd resolve into the live tree.
+
+**Configurable** (`--from /Users/joeblack --to /Users/joe`), idempotent, dry-run default, reversible
+(`/recall:migrate --revert`), with a manifest logging every move/rewrite for audit and rollback.
+Component: `src/migrate/home-path.ts`; command `/recall:migrate`.
+
 ## 4. Distribution shape (decided)
 
 `cc-recall` is its **own repo** and ships as a **Claude Code plugin**, installable with a one-liner
@@ -109,7 +140,7 @@ secondary and optional; a failure in either never breaks the system.**
 ```text
 cc-recall/
   .claude-plugin/plugin.json     # Claude Code plugin manifest (canonical location)
-  commands/                      # /recall:search, /recall:backfill, /recall:status, /recall:lineage, /recall:doctor
+  commands/                      # /recall:search, /recall:backfill, /recall:migrate, /recall:status, /recall:lineage, /recall:doctor
   skills/using-cc-recall/SKILL.md# thin "how to find a past session" skill
   hooks/
     hooks.json                   # SessionEnd + UserPromptSubmit registration
@@ -120,6 +151,7 @@ cc-recall/
     transcript/parse.ts          # JSONL reader, record-type model, cwd/title/timestamps
     record/schema.ts             # RecallRecord type + zod schema + schema_version
     record/synthesizer.ts        # transcript → Record (shared by forward + backfill)
+    migrate/home-path.ts         # Phase 0: joeblack→joe slug merge + in-transcript cwd rewrite
     surfaces/sidecar.ts          # SQLite read/write (PRIMARY)
     surfaces/transcript-writer.ts# edit-in-place: backup, inject record, rewrite title, integrity, revert
     surfaces/claude-mem.ts       # upsert adapter (guarded by G0)
@@ -224,6 +256,7 @@ storage, to avoid bloating auto-injected context.
 | forward capture | `hooks/hooks.json` → `SessionEnd` |
 | adoption reminder | `hooks/hooks.json` → `UserPromptSubmit` |
 | manual ops | `commands/` → `/recall:search`, `/recall:backfill`, `/recall:status`, `/recall:lineage` |
+| home-path normalization (Phase 0) | `commands/` → `/recall:migrate` (joeblack→joe consolidation + cwd rewrite) |
 | health & diagnostics | `commands/` → `/recall:doctor` (G0 claude-mem check + sidecar integrity + coverage % + fix suggestions) |
 | "how to find a session" guidance | `skills/using-cc-recall/SKILL.md` |
 | cross-tool retrieval (future) | optional MCP server exposing `search`/`lineage` |
@@ -276,9 +309,19 @@ and splitting adds significant synthesis complexity. Revisit after v1 retrieval 
   end-to-end (observation generation, search, retrieval round-trip) and reports pass/fail. No
   claude-mem-dependent code path is enabled until G0 is green. Rationale: claude-mem was recently
   repaired; we will not build a cascade of dependencies on an unverified component.
-- **S0 — picker spike (gates ② title strategy):** reverse-engineer the VS Code extension's session
-  enumeration (count cap? sort key? cache?) to know what title/metadata edits the native picker will
-  actually honor. Output documented; ② proceeds with sidecar-first regardless of outcome.
+- **S0 — picker & title-generation spike (gates ② title strategy):** reverse-engineer (a) the VS
+  Code extension's session enumeration (count cap? sort key? cache?) to know what title/metadata
+  edits the native picker will honor, and (b) **where and when `ai-title` is generated** — Claude
+  Code CLI/core vs the VS Code extension — and **why 97.7% of sessions lack one**. Working
+  hypothesis: titling runs only forward from a recent feature release with no retroactive backfill,
+  and the `joeblack→joe` home move orphaned 76% under dead slugs. Output documented; ② proceeds
+  sidecar-first regardless of outcome. **Deliverable: a detailed upstream issue (§U0).**
+
+- **U0 — upstream issue (deliverable, not a blocker):** file a well-evidenced issue at
+  `anthropics/claude-code` reporting the indexing deficiency with the measured data (15,154 sessions,
+  **2.3% titled / 97.7% untitled**, 11,557 under a dead home slug), the attributed root cause from
+  S0, and a request for retroactive titling + home-path migration handling. cc-recall is the
+  workaround; the upstream fix is the real cure.
 
 ## 13. Safety & reversibility (edit-in-place)
 
@@ -301,15 +344,19 @@ and splitting adds significant synthesis complexity. Revisit after v1 retrieval 
 
 ## 15. Rollout phases
 
-1. **Build core** — S0 spike + G0 verify + synthesizer + sidecar + transcript-writer; test on a tiny
-   sample (the 8 pieces-dev sessions).
-2. **Trial backfill** — run over the ~15k existing transcripts (your designated trial), `--dry-run`
-   first, then for real; validate sidecar + a spot-check of edited transcripts.
-3. **Forward capture** — enable the `SessionEnd` hook.
-4. **Secondary surfaces** — after G0: claude-mem upsert + native-memory front page.
-5. **Packaging** — plugin manifest, commands, skill, marketplace entry, one-liner install.
-6. **Adoption measurement** — reminder hook live; decide whether a dedicated tool is warranted.
-7. **(future)** remaining transcript types (subagent sidechains, other machines); pseudo-splitting.
+1. **Build core** — S0 spike (incl. title-generation attribution) + G0 verify + synthesizer +
+   sidecar + transcript-writer + **`src/migrate/home-path.ts`**; test on a tiny sample (the 8
+   pieces-dev sessions). File the **U0 upstream issue** once S0 attribution is in hand.
+2. **Phase 0 — home-path normalization (runs before any backfill):** `/recall:migrate --dry-run`,
+   review the manifest, then migrate for real — consolidate the 11,557 old-home sessions (with
+   merges) and rewrite in-transcript cwd.
+3. **Trial backfill** — run over the now-consolidated ~15k transcripts (your designated trial),
+   `--dry-run` first, then for real; validate sidecar + a spot-check of edited transcripts.
+4. **Forward capture** — enable the `SessionEnd` hook.
+5. **Secondary surfaces** — after G0: claude-mem upsert + native-memory front page.
+6. **Packaging** — plugin manifest, commands, skill, marketplace entry, one-liner install.
+7. **Adoption measurement** — reminder hook live; decide whether a dedicated tool is warranted.
+8. **(future)** remaining transcript types (subagent sidechains, other machines); pseudo-splitting.
 
 ## 16. Open questions / risks
 
@@ -319,3 +366,6 @@ and splitting adds significant synthesis complexity. Revisit after v1 retrieval 
   resumable, and rate-aware.
 - **claude-mem upsert semantics:** exact API for replace-vs-duplicate confirmed during G0.
 - **Handoff match precision:** fuzzy text matching may mis-link; keep links nullable and auditable.
+- **Migration blast radius (Phase 0):** moves/edits ~11.5k files across 33 dirs with 16+ merges —
+  run only with a full backup, `--dry-run` + manifest review first, and ideally while Claude Code /
+  claude-mem indexing is idle; collisions merge by unique UUID with pre-move verification.
