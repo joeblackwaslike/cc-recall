@@ -1,3 +1,6 @@
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 /**
  * claude-mem-watchdog — OpenClaw plugin (the Telegram approve/deny bridge).
  *
@@ -18,44 +21,47 @@
  * export loads without error but the loader never wires its register(), so the
  * hook silently never fires — the wrapper is required.
  */
-import { definePluginEntry } from "openclaw/plugin-sdk/core";
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { definePluginEntry } from 'openclaw/plugin-sdk/core';
 
-const STATE_DIR = path.join(os.homedir(), ".claude-mem-watchdog");
-const DECISIONS_DIR = path.join(STATE_DIR, "decisions");
-const OWNER_FILE = path.join(STATE_DIR, "owner.json");
+const STATE_DIR = path.join(os.homedir(), '.claude-mem-watchdog');
+const DECISIONS_DIR = path.join(STATE_DIR, 'decisions');
+const OWNER_FILE = path.join(STATE_DIR, 'owner.json');
 const DECISION_RE = /^\s*(approve|deny)\s+([A-Za-z0-9_-]{2,64})\s*$/i;
 
 async function writeJson(p, obj) {
   await fs.mkdir(path.dirname(p), { recursive: true });
-  await fs.writeFile(p, JSON.stringify(obj, null, 2), "utf-8");
+  await fs.writeFile(p, JSON.stringify(obj, null, 2), 'utf-8');
 }
 
 export default definePluginEntry({
-  id: "claude-mem-watchdog",
-  name: "claude-mem watchdog bridge",
+  id: 'claude-mem-watchdog',
+  name: 'claude-mem watchdog bridge',
   description:
     "Claims Telegram 'approve <id>' / 'deny <id>' replies for the claude-mem watchdog so the agent ignores them; self-bootstraps the owner chat id.",
   register(api) {
-    api.on("inbound_claim", async (event, ctx) => {
+    api.on('inbound_claim', async (event, ctx) => {
       try {
-        const channel = event?.channel ?? ctx?.channelId ?? "";
-        if (channel && channel !== "telegram") return; // only telegram; don't claim others
+        const channel = event?.channel ?? ctx?.channelId ?? '';
+        if (channel && channel !== 'telegram') return; // only telegram; don't claim others
 
-        const ownerId = String(event?.conversationId ?? ctx?.conversationId ?? event?.senderId ?? "").trim();
+        const ownerId = String(
+          event?.conversationId ?? ctx?.conversationId ?? event?.senderId ?? '',
+        ).trim();
 
         // Self-bootstrap owner id once (only if not already recorded).
         if (ownerId) {
           try {
             await fs.access(OWNER_FILE);
           } catch {
-            await writeJson(OWNER_FILE, { channel: "telegram", id: ownerId, updatedAt: new Date().toISOString() }).catch(() => {});
+            await writeJson(OWNER_FILE, {
+              channel: 'telegram',
+              id: ownerId,
+              updatedAt: new Date().toISOString(),
+            }).catch(() => {});
           }
         }
 
-        const m = String(event?.content ?? "").match(DECISION_RE);
+        const m = String(event?.content ?? '').match(DECISION_RE);
         if (!m) return; // not an approve/deny → let the agent handle it
 
         const verdict = m[1].toLowerCase();
