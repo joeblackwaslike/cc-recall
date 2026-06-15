@@ -1,0 +1,9 @@
+{
+  "name": "cc-recall",
+  "version": "0.1.0",
+  "description": "Make every Claude Code session discoverable by what was done, asked, and questioned.",
+  "author": { "name": "Joe Black", "email": "joeblackwaslike@gmail.com" },
+  "homepage": "https://github.com/joeblackwaslike/cc-recall",
+  "repository": "https://github.com/joeblackwaslike/cc-recall",
+  "license": "MIT"
+}
