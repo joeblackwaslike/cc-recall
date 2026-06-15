@@ -109,4 +109,25 @@ describe('resolveHandoffIn', () => {
     ];
     expect(resolveHandoffIn(target, candidates)).toBe('a');
   });
+
+  it('returns null when no candidates match above threshold', () => {
+    const target = makeRecord({
+      session_id: 'b',
+      started_at: SUCCESSOR_STARTED_AT,
+      handoff_in: { from_session: null, text: 'continuing from the sidecar session' },
+    });
+    const candidates = [
+      makeRecord({
+        session_id: 'a',
+        ended_at: BASE_ENDED_AT,
+        title: 'Fix CSS grid layout',
+      }),
+    ];
+    expect(resolveHandoffIn(target, candidates)).toBeNull();
+  });
+
+  it('returns null when handoff_in is null', () => {
+    const target = makeRecord({ session_id: 'b', handoff_in: null });
+    expect(resolveHandoffIn(target, [])).toBeNull();
+  });
 });
