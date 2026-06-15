@@ -107,8 +107,10 @@ export type TranscriptRecord =
   | SystemRecord
   | BaseRecord;
 
-export const isUserRecord = (r: BaseRecord): r is UserRecord => r.type === 'user';
-export const isAssistantRecord = (r: BaseRecord): r is AssistantRecord => r.type === 'assistant';
+export const isUserRecord = (r: BaseRecord): r is UserRecord =>
+  r.type === 'user' && 'message' in r && typeof r.message === 'object' && r.message != null;
+export const isAssistantRecord = (r: BaseRecord): r is AssistantRecord =>
+  r.type === 'assistant' && 'message' in r && typeof r.message === 'object' && r.message != null;
 export const isAiTitleRecord = (r: BaseRecord): r is AiTitleRecord =>
   r.type === 'ai-title' && typeof (r as AiTitleRecord).aiTitle === 'string';
 export const isLastPromptRecord = (r: BaseRecord): r is LastPromptRecord =>

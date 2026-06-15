@@ -30,8 +30,12 @@ const TMP_SUFFIX = '.cc-recall-tmp';
 
 export const defaultBaseDir = (): string => path.join(homedir(), '.claude', 'cc-recall');
 
-export const backupPathFor = (sessionId: string, baseDir = defaultBaseDir()): string =>
-  path.join(baseDir, 'backups', `${sessionId}.jsonl`);
+const isValidSessionId = (id: string): boolean => /^[a-zA-Z0-9_-]+$/.test(id);
+
+export const backupPathFor = (sessionId: string, baseDir = defaultBaseDir()): string => {
+  if (!isValidSessionId(sessionId)) throw new Error(`invalid session ID: ${sessionId}`);
+  return path.join(baseDir, 'backups', `${sessionId}.jsonl`);
+};
 
 export interface WriteOptions {
   /** Base dir for backups; defaults to ~/.claude/cc-recall. */

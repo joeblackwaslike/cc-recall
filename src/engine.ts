@@ -98,7 +98,13 @@ const transcriptsInDir = (dir: string): string[] => {
 /** Enumerate every transcript under the projects root, optionally filtered by dir substring. */
 export const listTranscripts = (projectsRoot: string, scope?: string): string[] => {
   const files: string[] = [];
-  for (const dir of readdirSync(projectsRoot)) {
+  let directories: string[];
+  try {
+    directories = readdirSync(projectsRoot);
+  } catch {
+    return [];
+  }
+  for (const dir of directories) {
     if (scope && !dir.includes(scope)) continue;
     files.push(...transcriptsInDir(path.join(projectsRoot, dir)));
   }

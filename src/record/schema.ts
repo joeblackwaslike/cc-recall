@@ -33,7 +33,7 @@ export const toolCountSchema = z.object({
 
 export const recallRecordSchema = z.object({
   type: z.literal(RECALL_RECORD_TYPE),
-  schema_version: z.number().int().positive(),
+  schema_version: z.literal(SCHEMA_VERSION),
   session_id: z.string(),
   project: z.string(), // encoded-cwd dir name
   cwd: z.string(), // dominant cwd in the session

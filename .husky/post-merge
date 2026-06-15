@@ -1,1 +1,1 @@
-command -v bd >/dev/null 2>&1 && bd hooks run post-merge "$@" || true
+if command -v bd >/dev/null 2>&1; then bd hooks run post-merge "$@"; fi

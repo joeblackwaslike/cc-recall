@@ -26,25 +26,6 @@ build:
 clean:
   rm -rf dist coverage
 
-# Build and publish to npm
-release: build
-  pnpm publish
-
-# Start docs dev server
-docs:
-  pnpm docs:start
-
-# Build docs
-docs-build:
-  pnpm docs:build
-
-# Serve built docs locally
-docs-serve:
-  pnpm docs:serve
-
-# Clear Docusaurus cache
-docs-clear:
-  pnpm docs:clear
 
 # Check for unused dependencies
 deps:

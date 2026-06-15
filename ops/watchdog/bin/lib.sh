@@ -55,7 +55,7 @@ plugin_dir() {
   return 1
 }
 
-worker_healthy() { curl -sf -m 5 "http://${WORKER_HOST}:${WORKER_PORT}/health" >/dev/null 2>&1; }
+worker_healthy() { curl -sf -m "$WORKER_HEALTH_TIMEOUT_SECS" "http://${WORKER_HOST}:${WORKER_PORT}/health" >/dev/null 2>&1; }
 
 worker_start() {
   local p; p="$(plugin_dir)" || { err "plugin dir not found under $PLUGIN_GLOB"; return 1; }
@@ -73,10 +73,19 @@ db_pragma() {
   [ -f "$CLAUDE_MEM_DB" ] || return 1
   "$SQLITE3" "$CLAUDE_MEM_DB" "PRAGMA page_count; PRAGMA freelist_count; PRAGMA page_size;" 2>/dev/null | paste -sd' ' -
 }
-db_size_mb() { local pc ps; read -r pc _ ps <<<"$(db_pragma)"; [ -n "${pc:-}" ] && echo $(( pc * ps / 1048576 )) || echo 0; }
+db_size_mb() {
+  local val pc ps
+  val=$(db_pragma) || return 1
+  read -r pc _ ps <<<"$val"
+  if ! [[ "${pc:-}" =~ ^[0-9]+$ ]] || ! [[ "${ps:-}" =~ ^[0-9]+$ ]]; then return 1; fi
+  echo $(( pc * ps / 1048576 ))
+}
 db_freelist_ratio() { # prints e.g. 0.50 (2 dp) via awk
-  local pc fl _; read -r pc fl _ <<<"$(db_pragma)"
-  [ -n "${pc:-}" ] && [ "$pc" -gt 0 ] 2>/dev/null && awk -v f="$fl" -v p="$pc" 'BEGIN{printf "%.2f", f/p}' || echo 0
+  local val pc fl _
+  val=$(db_pragma) || return 1
+  read -r pc fl _ <<<"$val"
+  if ! [[ "${pc:-}" =~ ^[0-9]+$ ]] || ! [[ "${fl:-}" =~ ^[0-9]+$ ]]; then return 1; fi
+  [ "$pc" -gt 0 ] 2>/dev/null && awk -v f="$fl" -v p="$pc" 'BEGIN{printf "%.2f", f/p}' || echo 0
 }
 
 # --- CLAUDE_CODE_PATH validity / repair -------------------------------------

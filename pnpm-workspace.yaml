@@ -1,5 +1,5 @@
-# Native deps whose install/build scripts are explicitly trusted (pnpm gate).
-onlyBuiltDependencies:
-  - '@biomejs/biome'
-  - esbuild
-  - unrs-resolver
+# Native deps whose install/build scripts are explicitly trusted (pnpm 11 gate).
+allowBuilds:
+  '@biomejs/biome': true
+  esbuild: true
+  unrs-resolver: true

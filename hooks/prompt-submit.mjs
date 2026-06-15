@@ -27,6 +27,11 @@ try {
   process.exit(0);
 }
 
+if (typeof payload !== 'object' || payload === null) {
+  proceed();
+  process.exit(0);
+}
+
 const prompt = typeof payload.prompt === 'string' ? payload.prompt.toLowerCase() : '';
 
 const INTENT_RE =

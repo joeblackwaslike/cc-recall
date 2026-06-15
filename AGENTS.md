@@ -23,8 +23,7 @@ corpus; a `UserPromptSubmit` hook reminds the agent to search the records before
 
 ## Status
 
-Pre-implementation. Design spec lives in `docs/superpowers/specs/`. See the spec before
-building anything.
+Phase 1 implemented. Design spec lives in `docs/superpowers/specs/`.
 
 ## Stack
 

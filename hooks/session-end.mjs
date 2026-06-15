@@ -27,7 +27,8 @@ const readPayload = () => {
     raw = '';
   }
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
   } catch {
     return {};
   }

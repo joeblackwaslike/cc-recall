@@ -263,13 +263,15 @@ export const runClaudeHeadless: LlmRunner = (prompt) =>
       if (code === 0) resolve(stdout);
       else reject(new Error(stderr.trim() || `claude -p exited ${code ?? 'null'}`));
     });
+    // eslint-disable-next-line @typescript-eslint/no-empty-function -- EPIPE swallowed; close event handles the failure
+    child.stdin.on('error', () => {});
     child.stdin.end(prompt);
   });
 
 const applyEnrichment = (base: RecallRecord, enrichment: LlmEnrichment): RecallRecord => ({
   ...base,
   title: truncate(enrichment.title, TITLE_MAX),
-  summary: enrichment.summary,
+  summary: truncate(enrichment.summary, SUMMARY_MAX),
   asks_implemented: enrichment.asks_implemented,
   completions: enrichment.completions,
   facets: enrichment.facets,

@@ -52,9 +52,7 @@
   "engines": {
     "node": ">=22"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": ["@biomejs/biome", "core-js", "esbuild", "unrs-resolver"]
-  },
+  "packageManager": "pnpm@11.7.0",
   "private": true,
   "lint-staged": {
     "*.{ts,js,json,md}": [

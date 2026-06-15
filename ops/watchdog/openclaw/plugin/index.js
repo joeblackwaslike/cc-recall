@@ -1,3 +1,4 @@
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -63,6 +64,28 @@ export default definePluginEntry({
 
         const m = String(event?.content ?? '').match(DECISION_RE);
         if (!m) return; // not an approve/deny → let the agent handle it
+
+        // Enforce owner identity: only the bootstrapped owner can approve/deny.
+        const storedOwner = (() => {
+          try {
+            return fsSync.readFileSync(OWNER_FILE, 'utf8').trim();
+          } catch {
+            return null;
+          }
+        })();
+        if (storedOwner) {
+          const parsed = (() => {
+            try {
+              return JSON.parse(storedOwner);
+            } catch {
+              return null;
+            }
+          })();
+          const storedId = parsed?.id ?? storedOwner;
+          if (String(ownerId) !== String(storedId)) {
+            return { handled: false };
+          }
+        }
 
         const verdict = m[1].toLowerCase();
         const requestId = m[2];

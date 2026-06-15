@@ -9,12 +9,14 @@ Resolve and display the handoff chain for a session — which sessions it contin
 ## Usage
 
 First, ensure lineage has been resolved:
+
 ```bash
 # Lineage resolution runs as part of backfill or can be triggered programmatically
 # via the resolve module.
 ```
 
 Then search for a session and read its `handoff_in` / `handoff_out` fields:
+
 ```bash
 cc-recall search "<query>"
 ```

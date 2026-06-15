@@ -8,13 +8,22 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 SCRIPT_NAME="watchdog-audit"
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-disk_free_mb() { df -m "$CLAUDE_MEM_DIR" 2>/dev/null | awk 'NR==2{print $4}'; }
+disk_free_mb() {
+  local val
+  val=$(df -m "$CLAUDE_MEM_DIR" 2>/dev/null | awk 'NR==2{print $4}')
+  if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+    echo "WARN: cannot determine disk free space" >&2
+    echo 999999
+    return
+  fi
+  echo "$val"
+}
 
 prune_pending() {
   local cutoff_ms changed
   cutoff_ms=$(( ( $(date +%s) - PENDING_STALE_HOURS*3600 ) * 1000 ))
   changed="$("$SQLITE3" "$CLAUDE_MEM_DB" \
-    "DELETE FROM pending_messages WHERE status='failed' OR created_at_epoch < $cutoff_ms; SELECT changes();" 2>/dev/null | tail -1)"
+    "DELETE FROM pending_messages WHERE status='failed' OR (status='pending' AND created_at_epoch < $cutoff_ms); SELECT changes();" 2>/dev/null | tail -1)"
   [ -n "${changed:-}" ] && [ "$changed" -gt 0 ] 2>/dev/null && incident fixed "pruned stale/failed pending rows" "$(jq -cn --argjson n "$changed" '{rows:$n}')"
 }
 

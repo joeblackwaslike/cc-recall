@@ -29,7 +29,7 @@ message but can't *listen* for a reply. So the watchdog **never listens** — th
 listening is delegated to OpenClaw's always-on Gateway via a claim plugin, and the
 two sides rendezvous through files:
 
-```
+```text
                               ~/.claude-mem-watchdog/
   ┌──────────────┐   writes   ┌─────────────┐   polls    ┌──────────────┐
   │ OpenClaw     │ ─────────▶ │ decisions/  │ ◀───────── │ watchdog     │

@@ -56,6 +56,18 @@
     }
   },
   "files": {
-    "ignore": ["node_modules", "dist", "coverage", "*.generated.ts"]
-  }
+    "ignore": ["node_modules", "dist", "coverage", ".beads", "*.generated.ts"]
+  },
+  "overrides": [
+    {
+      "include": ["src/surfaces/sidecar.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "useNamingConvention": "off"
+          }
+        }
+      }
+    }
+  ]
 }

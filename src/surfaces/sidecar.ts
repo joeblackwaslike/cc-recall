@@ -12,7 +12,11 @@ import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import { type RecallRecord, parseRecallRecord } from '../record/schema.js';
 
 const DEFAULT_SEARCH_LIMIT = 20;
+const MAX_LIMIT = 1000;
 const IN_MEMORY = ':memory:';
+
+const clampLimit = (limit: number): number =>
+  Math.max(1, Math.min(Math.floor(limit) || DEFAULT_SEARCH_LIMIT, MAX_LIMIT));
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -105,23 +109,23 @@ const sessionRow = (
   record: RecallRecord,
   sourceHash: string | undefined,
 ): Record<string, string | number | null> => ({
-  session_id: record.session_id,
-  project: record.project,
-  cwd: record.cwd,
-  git_branch: record.git_branch ?? null,
-  started_at: record.started_at,
-  ended_at: record.ended_at,
-  line_count: record.line_count,
-  title: record.title,
-  summary: record.summary,
-  provenance: record.provenance,
-  schema_version: record.schema_version,
-  synthesizer_version: record.synthesizer_version,
-  generated_at: record.generated_at,
-  source_hash: sourceHash ?? null,
-  handoff_in_from: record.handoff_in?.from_session ?? null,
-  handoff_out_to: record.handoff_out?.to_session ?? null,
-  record_json: JSON.stringify(record),
+  $session_id: record.session_id,
+  $project: record.project,
+  $cwd: record.cwd,
+  $git_branch: record.git_branch ?? null,
+  $started_at: record.started_at,
+  $ended_at: record.ended_at,
+  $line_count: record.line_count,
+  $title: record.title,
+  $summary: record.summary,
+  $provenance: record.provenance,
+  $schema_version: record.schema_version,
+  $synthesizer_version: record.synthesizer_version,
+  $generated_at: record.generated_at,
+  $source_hash: sourceHash ?? null,
+  $handoff_in_from: record.handoff_in?.from_session ?? null,
+  $handoff_out_to: record.handoff_out?.to_session ?? null,
+  $record_json: JSON.stringify(record),
 });
 
 interface Statements {
@@ -163,12 +167,15 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
     db.prepare('BEGIN').run();
     try {
       statement.upsertSession.run(sessionRow(record, sourceHash));
-      statement.deleteFts.run({ session_id: record.session_id });
+      statement.deleteFts.run({ $session_id: record.session_id });
+      const blob = ftsBlob(record);
       statement.insertFts.run({
-        session_id: record.session_id,
-        title: record.title,
-        summary: record.summary,
-        ...ftsBlob(record),
+        $session_id: record.session_id,
+        $title: record.title,
+        $summary: record.summary,
+        $facets: blob.facets,
+        $phrases: blob.phrases,
+        $files: blob.files,
       });
       db.prepare('COMMIT').run();
     } catch (error) {
@@ -177,13 +184,13 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
     }
   },
   get(sessionId) {
-    const row = statement.selectOne.get({ session_id: sessionId }) as
+    const row = statement.selectOne.get({ $session_id: sessionId }) as
       | { record_json: string }
       | undefined;
     return row ? parseRecallRecord(JSON.parse(row.record_json)) : undefined;
   },
   getSourceHash(sessionId) {
-    const row = statement.selectHash.get({ session_id: sessionId }) as
+    const row = statement.selectHash.get({ $session_id: sessionId }) as
       | { source_hash: string | null }
       | undefined;
     return row?.source_hash ?? undefined;
@@ -195,7 +202,7 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
   search(query, limit = DEFAULT_SEARCH_LIMIT) {
     const ftsQuery = toFtsQuery(query);
     if (!ftsQuery) return [];
-    const rows = statement.searchStmt.all({ query: ftsQuery, limit }) as {
+    const rows = statement.searchStmt.all({ $query: ftsQuery, $limit: clampLimit(limit) }) as {
       record_json: string;
       score: number;
     }[];
@@ -205,7 +212,7 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
     }));
   },
   top(limit) {
-    const rows = statement.topStmt.all({ limit }) as { record_json: string }[];
+    const rows = statement.topStmt.all({ $limit: clampLimit(limit) }) as { record_json: string }[];
     return rows.map((row) => parseRecallRecord(JSON.parse(row.record_json)));
   },
   stats() {

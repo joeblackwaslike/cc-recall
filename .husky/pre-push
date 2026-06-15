@@ -1,1 +1,1 @@
-command -v bd >/dev/null 2>&1 && bd hooks run pre-push "$@" || true
+if command -v bd >/dev/null 2>&1; then bd hooks run pre-push "$@"; fi

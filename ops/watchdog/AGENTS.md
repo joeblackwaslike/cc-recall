@@ -36,7 +36,7 @@ A Telegram approve/deny **bridge is PARKED** (`openclaw/plugin/`, not installed 
   - **`plugins.allow` is an EXCLUSIVE allowlist** — setting it (even to `[]`) drops
     every plugin not listed (this cut the live set ~10 → 3). Leave the key absent.
   - The `inbound_claim` event exposes `event.channel` (not `channelId`), `.content`,
-    `.senderId`, `.conversationId`. Owner Telegram chat id = `1802148062`.
+    `.senderId`, `.conversationId`. Owner Telegram chat id = `<owner-chat-id>` (captured dynamically via inbound messages into `owner.json`).
 - **`openclaw message read` does not support Telegram** (Discord/Slack/Matrix
   only). That's why we use a hook (push) for replies, not polling reads.
 - **`openclaw message send` JSON shape** is `.payload.ok` / `.payload.messageId`

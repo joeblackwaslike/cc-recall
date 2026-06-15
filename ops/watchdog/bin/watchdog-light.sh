@@ -13,10 +13,13 @@ dispatch_action() {
   case "$action" in
     delete-file)
       local p; p="$(jq -r '.path // empty' <<<"$params")"
-      # safety: only inside the claude-mem dir, and never the live DB/settings
-      case "$p" in
-        "$CLAUDE_MEM_DIR"/*) : ;;
-        *) err "refusing delete outside $CLAUDE_MEM_DIR: $p"; return 1 ;;
+      # safety: canonicalize to block ".." traversal, then prefix-check
+      local resolved resolved_base
+      resolved=$(realpath -- "$p" 2>/dev/null) || { err "Cannot resolve path: $p"; return 1; }
+      resolved_base=$(realpath -- "$CLAUDE_MEM_DIR" 2>/dev/null) || return 1
+      case "$resolved" in
+        "$resolved_base"/*) ;; # safe
+        *) err "Path escapes $CLAUDE_MEM_DIR: $p"; return 1 ;;
       esac
       [ "$p" = "$CLAUDE_MEM_DB" ] || [ "$p" = "$CLAUDE_MEM_SETTINGS" ] && { err "refusing to delete live file: $p"; return 1; }
       [ -e "$p" ] && rm -rf "$p" && info "deleted $p" && return 0
@@ -38,7 +41,7 @@ main() {
         "manual-investigation" >/dev/null
     else
       warn "worker unhealthy — restarting (attempt $fails)"
-      worker_start; sleep 6
+      worker_start; sleep "$WORKER_RESTART_SETTLE_SECS"
       if worker_healthy; then cb_reset worker_restart; incident fixed "restarted dead worker"; \
         else warn "restart attempt $fails did not bring worker healthy yet"; fi
     fi
@@ -60,7 +63,7 @@ main() {
       warn "CLAUDE_CODE_PATH invalid ($ccp) — repointing to $good"
       if patch_claude_code_path "$good"; then
         incident fixed "repaired CLAUDE_CODE_PATH" "$(jq -cn --arg o "$ccp" --arg n "$good" '{old:$o, new:$n}')"
-        worker_stop; sleep 2; worker_start
+        worker_stop; sleep "$WORKER_RESTART_AFTER_PATCH_SECS"; worker_start
         notify "🔧 repaired CLAUDE_CODE_PATH: $ccp → $good (was the 2026-06 bloat trigger)" || true
       fi
     else
