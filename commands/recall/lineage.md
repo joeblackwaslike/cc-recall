@@ -4,6 +4,23 @@ description: "Walk a thread across sessions (handoff to successor)."
 
 # /recall:lineage
 
-Given a session id, follow lineage links; unresolved links stay null (honest).
+Resolve and display the handoff chain for a session — which sessions it continued from and which sessions continued from it.
 
-**Status:** scaffolded (cc-recall-3i1), not yet implemented. See `docs/superpowers/specs/2026-06-14-cc-recall-design.md`.
+## Usage
+
+First, ensure lineage has been resolved:
+```bash
+# Lineage resolution runs as part of backfill or can be triggered programmatically
+# via the resolve module.
+```
+
+Then search for a session and read its `handoff_in` / `handoff_out` fields:
+```bash
+cc-recall search "<query>"
+```
+
+The `handoff_in.from_session` and `handoff_out.to_session` fields form a navigable DAG. Follow the chain by looking up each linked session_id in the sidecar.
+
+## Note
+
+Lineage resolution is best-effort. Unresolved links stay `null` — this is intentional (honest, not fuzzy). If a handoff link is missing, the matching heuristic didn't find a confident match within the 7-day time window.
