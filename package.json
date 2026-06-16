@@ -41,7 +41,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.32.1",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.9"
   },
   "author": "Joe Black <joeblackwaslike@gmail.com>",
   "license": "MIT",
