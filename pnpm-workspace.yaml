@@ -1,0 +1,8 @@
+# Native deps whose install/build scripts are explicitly trusted (pnpm 11 gate).
+allowBuilds:
+  '@biomejs/biome': true
+  esbuild: true
+  unrs-resolver: true
+
+overrides:
+  eslint-plugin-sonarjs>minimatch: '>=10.2.5'

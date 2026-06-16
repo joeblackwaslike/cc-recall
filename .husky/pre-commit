@@ -1,0 +1,2 @@
+pnpm lint-staged
+if command -v bd >/dev/null 2>&1; then bd hooks run pre-commit "$@"; fi
