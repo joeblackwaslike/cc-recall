@@ -60,7 +60,11 @@
   },
   "overrides": [
     {
-      "include": ["src/surfaces/sidecar.ts"],
+      "include": [
+        "src/surfaces/sidecar.ts",
+        "src/surfaces/claude-mem.ts",
+        "src/surfaces/claude-mem.test.ts"
+      ],
       "linter": {
         "rules": {
           "style": {
