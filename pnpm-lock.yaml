@@ -40,8 +40,8 @@ importers:
         specifier: ^4.12.2
         version: 4.16.2(@typescript-eslint/utils@8.61.0(eslint@10.5.0)(typescript@5.9.3))(eslint@10.5.0)
       eslint-plugin-no-secrets:
-        specifier: ^1.1.2
-        version: 1.1.2(eslint@10.5.0)
+        specifier: ^2.3.3
+        version: 2.3.3(eslint@10.5.0)
       eslint-plugin-sonarjs:
         specifier: ^3.0.2
         version: 3.0.7(eslint@10.5.0)
@@ -1273,11 +1273,11 @@ packages:
       eslint-import-resolver-node:
         optional: true
 
-  eslint-plugin-no-secrets@1.1.2:
-    resolution: {integrity: sha512-FjgyBaEkQK6hrdKf0V1TnKbY3dxXmw8S7tjfHs/BMIgFGNYhzFccxbZSJtDCPHTQTSiBtdLwRlOmSF81toII4w==}
-    engines: {node: '>=10.0.0', npm: '>=6.9.0'}
+  eslint-plugin-no-secrets@2.3.3:
+    resolution: {integrity: sha512-sroCsCscpwQxZ/O9Ml69w5qt/2nvHhXDeyUnSqSC5dMANGxt4rQgUn7xbPvDmhbMPmUCAc2Y3SRU0cXet7kNWQ==}
+    engines: {node: '>=18', npm: '>=8'}
     peerDependencies:
-      eslint: '>=3.0.0'
+      eslint: '>=5'
 
   eslint-plugin-sonarjs@3.0.7:
     resolution: {integrity: sha512-62jB20krIPvcwBLAyG3VVKa2ce2j2lL1yCb8Y0ylMRR/dLvCCTiQx8gQbXb+G81k1alPZ2/I3muZinqWQdBbzw==}
@@ -3208,7 +3208,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-no-secrets@1.1.2(eslint@10.5.0):
+  eslint-plugin-no-secrets@2.3.3(eslint@10.5.0):
     dependencies:
       eslint: 10.5.0
 
