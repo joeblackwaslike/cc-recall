@@ -132,15 +132,12 @@ const rewriteTargets = (
   merges: readonly FileMerge[],
   dryRun: boolean,
 ): string[] => {
-  const files = new Set<string>();
-  for (const merge of merges) {
-    if (merge.collision) continue;
-    files.add(dryRun ? merge.from : merge.to);
-  }
-  for (const move of moves) {
-    for (const file of jsonlFilesIn(dryRun ? move.from : move.to)) files.add(file);
-  }
-  return [...files];
+  const merged = merges
+    .filter((m) => !m.collision)
+    .map((m) => (dryRun ? m.from : m.to))
+    .filter((f) => f.endsWith('.jsonl'));
+  const fromMoves = moves.flatMap((move) => jsonlFilesIn(dryRun ? move.from : move.to));
+  return [...new Set([...merged, ...fromMoves])];
 };
 
 const rewriteFile = (
