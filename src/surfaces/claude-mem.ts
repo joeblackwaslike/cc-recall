@@ -234,7 +234,7 @@ export const formatObservation = (
       session_id: record.session_id,
     }),
     created_at: record.generated_at,
-    created_at_epoch: new Date(record.generated_at).getTime(),
+    created_at_epoch: new Date(record.generated_at).getTime() || Date.now(),
   };
 };
 
@@ -270,9 +270,9 @@ export const upsertObservation = (record: RecallRecord, dbPath: string): UpsertR
 
     const sessionRow = db.prepare(SESSION_LOOKUP_SQL).get({
       $content_session_id: record.session_id,
-    }) as { memory_session_id: string } | undefined;
+    }) as { memory_session_id: string | null } | undefined;
 
-    if (!sessionRow) {
+    if (!sessionRow?.memory_session_id) {
       return {
         ok: false,
         inserted: false,
