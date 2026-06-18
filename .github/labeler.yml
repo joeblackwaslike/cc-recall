@@ -1,17 +1,27 @@
 docs:
-  - docs/**
-  - '**/*.md'
+  - changed-files:
+      - any-glob-to-any-file:
+          - docs/**
+          - '**/*.md'
 
 ci:
-  - .github/**
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
 
 tests:
-  - src/**/*.test.ts
-  - src/**/*.spec.ts
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/**/*.test.ts
+          - src/**/*.spec.ts
 
 dependencies:
-  - package.json
-  - pnpm-lock.yaml
+  - changed-files:
+      - any-glob-to-any-file:
+          - package.json
+          - pnpm-lock.yaml
 
 source:
-  - src/**
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/**
