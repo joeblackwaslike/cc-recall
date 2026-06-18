@@ -1,6 +1,6 @@
 // cc-recall — claude-mem adapter (spec §8③, §12 G0). SECONDARY surface, gated.
 //
-// Read paths use the worker HTTP API (GET /api/health, /api/search) — no auth needed.
+// Read paths use the worker HTTP API (GET /API/health, /API/search) — no auth needed.
 // Write path uses direct SQLite into ~/.claude-mem/claude-mem.db (the worker's own DB).
 // The HTTP write endpoint (/v1/memories) requires server-beta auth which isn't available
 // in worker mode, so we bypass it. The observations table has FTS triggers that auto-index
@@ -234,7 +234,7 @@ export const formatObservation = (
       session_id: record.session_id,
     }),
     created_at: record.generated_at,
-    created_at_epoch: new Date(record.generated_at).getTime() || Date.now(),
+    created_at_epoch: Date.parse(record.generated_at) || Date.now(),
   };
 };
 
@@ -270,7 +270,7 @@ export const upsertObservation = (record: RecallRecord, dbPath: string): UpsertR
 
     const sessionRow = db.prepare(SESSION_LOOKUP_SQL).get({
       $content_session_id: record.session_id,
-    }) as { memory_session_id: string | null } | undefined;
+    }) as undefined | { memory_session_id: string | null };
 
     if (!sessionRow?.memory_session_id) {
       return {
