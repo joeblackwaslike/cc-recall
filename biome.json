@@ -56,7 +56,7 @@
     }
   },
   "files": {
-    "ignore": ["node_modules", "dist", "coverage", ".beads", "*.generated.ts"]
+    "ignore": ["node_modules", "dist", "coverage", ".beads", "*.generated.ts", "*.code-workspace"]
   },
   "overrides": [
     {
