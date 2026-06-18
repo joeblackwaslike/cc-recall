@@ -48,6 +48,7 @@ describe('sidecar', () => {
     sidecar.upsert(recordFor('s-2', 'fix the migration script'), 'h2');
     const hits = sidecar.search('sidecar');
     expect(hits.map((h) => h.record.session_id)).toEqual(['s-1']);
+    // eslint-disable-next-line unicorn/prefer-string-repeat
     expect(sidecar.search('   ')).toEqual([]);
   });
 

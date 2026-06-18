@@ -3,7 +3,7 @@
 // One row per session plus an FTS5 index over title/summary/facets/phrases/files.
 // Retrieval queries this single file instead of opening ~15k transcripts. Owned
 // entirely by cc-recall and fully rebuildable from transcripts, so it is never a
-// single point of data loss. Uses node:sqlite (built into Node 22+) — no native
+// single point of data loss. Uses node:SQLite (built into Node 22+) — no native
 // compilation, which matters for a distributable plugin.
 
 import { mkdirSync } from 'node:fs';
@@ -185,14 +185,14 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
   },
   get(sessionId) {
     const row = statement.selectOne.get({ $session_id: sessionId }) as
-      | { record_json: string }
-      | undefined;
+      | undefined
+      | { record_json: string };
     return row ? parseRecallRecord(JSON.parse(row.record_json)) : undefined;
   },
   getSourceHash(sessionId) {
     const row = statement.selectHash.get({ $session_id: sessionId }) as
-      | { source_hash: string | null }
-      | undefined;
+      | undefined
+      | { source_hash: string | null };
     return row?.source_hash ?? undefined;
   },
   listAll() {

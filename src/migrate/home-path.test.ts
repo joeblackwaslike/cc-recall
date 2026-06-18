@@ -56,7 +56,9 @@ describe('migrateHomePaths', () => {
       dryRun: true,
     });
     expect(
-      manifest.dirMoves.map((move) => path.basename(move.to)).sort((a, b) => a.localeCompare(b)),
+      manifest.dirMoves
+        .map((move) => path.basename(move.to))
+        .toSorted((a, b) => a.localeCompare(b)),
     ).toEqual([NEW_BAR, NEW_FOO]);
     expect(existsSync(path.join(root, OLD_FOO))).toBe(true); // unchanged
   });

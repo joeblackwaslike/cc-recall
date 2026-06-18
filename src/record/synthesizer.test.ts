@@ -8,7 +8,7 @@ const SUBSTANTIAL_LEN = 250; // exceeds the synthesizer's HANDOFF_MIN_LEN (200)
 const LONG = 'x'.repeat(SUBSTANTIAL_LEN);
 
 const sortedStrings = (values: readonly string[]): string[] =>
-  [...values].sort((a, b) => a.localeCompare(b));
+  [...values].toSorted((a, b) => a.localeCompare(b));
 
 const lines = [
   {
@@ -114,7 +114,12 @@ describe('synthesize', () => {
     const warnings: string[] = [];
     const record = await synthesize(
       { parsed, project: 'proj', provenance: 'forward' },
-      { llm: () => Promise.reject(new Error('claude not found')), onWarn: (m) => warnings.push(m) },
+      {
+        llm: () => Promise.reject(new Error('claude not found')),
+        onWarn: (m) => {
+          warnings.push(m);
+        },
+      },
     );
     expect(record.title).toBe(parsed.aiTitle ?? '# Handoff: prior work');
     expect(warnings[0]).toContain('claude not found');

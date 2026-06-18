@@ -132,11 +132,12 @@ const rewriteTargets = (
   merges: readonly FileMerge[],
   dryRun: boolean,
 ): string[] => {
+  const key: 'from' | 'to' = dryRun ? 'from' : 'to';
   const merged = merges
     .filter((m) => !m.collision)
-    .map((m) => (dryRun ? m.from : m.to))
+    .map((m) => m[key])
     .filter((f) => f.endsWith('.jsonl'));
-  const fromMoves = moves.flatMap((move) => jsonlFilesIn(dryRun ? move.from : move.to));
+  const fromMoves = moves.flatMap((move) => jsonlFilesIn(move[key]));
   return [...new Set([...merged, ...fromMoves])];
 };
 
@@ -150,7 +151,7 @@ const rewriteFile = (
   const text = readFileSync(file, 'utf8');
   // Only rewrite the home when it is the start of a path (followed by `/` or a closing quote).
   const pattern = new RegExp(`${escapeRegExp(from)}(?=[/"])`, 'g');
-  const count = [...text.matchAll(pattern)].length;
+  const count = text.matchAll(pattern).toArray().length;
   if (count === 0 || dryRun) return count;
 
   const origErrors = parseTranscriptText(text, file).parseErrors;
@@ -158,7 +159,7 @@ const rewriteFile = (
   mkdirSync(path.dirname(backupPath), { recursive: true });
   if (!existsSync(backupPath)) copyFileSync(file, backupPath);
 
-  const rewritten = text.replaceAll(pattern, to);
+  const rewritten = text.replaceAll(pattern, () => to);
   const tmp = `${file}.cc-recall-tmp`;
   writeFileSync(tmp, rewritten);
   renameSync(tmp, file);

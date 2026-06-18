@@ -31,6 +31,9 @@ export const toolCountSchema = z.object({
   count: z.number().int().nonnegative(),
 });
 
+const stringArraySchema = z.array(z.string());
+const toolCountArraySchema = z.array(toolCountSchema);
+
 export const recallRecordSchema = z.object({
   type: z.literal(RECALL_RECORD_TYPE),
   schema_version: z.literal(SCHEMA_VERSION),
@@ -43,20 +46,20 @@ export const recallRecordSchema = z.object({
   line_count: z.number().int().nonnegative(),
   title: z.string(), // one line — also written to the ai-title record
   summary: z.string(), // 2–4 sentences
-  asks_implemented: z.array(z.string()), // user requests that became real changes
-  completions: z.array(z.string()), // end-of-work summaries the assistant printed
+  asks_implemented: stringArraySchema, // user requests that became real changes
+  completions: stringArraySchema, // end-of-work summaries the assistant printed
   handoff_in: handoffInSchema.nullable(),
   handoff_out: handoffOutSchema.nullable(),
   artifacts: z.object({
-    files_touched: z.array(z.string()),
-    top_tools: z.array(toolCountSchema),
-    distinctive_phrases: z.array(z.string()),
+    files_touched: stringArraySchema,
+    top_tools: toolCountArraySchema,
+    distinctive_phrases: stringArraySchema,
   }),
   facets: z.object({
     // the three retrieval axes
-    completed: z.array(z.string()),
-    questioned: z.array(z.string()),
-    asked_about: z.array(z.string()),
+    completed: stringArraySchema,
+    questioned: stringArraySchema,
+    asked_about: stringArraySchema,
   }),
   provenance: z.enum(['forward', 'backfill', 'manual']),
   generated_at: z.string(),
