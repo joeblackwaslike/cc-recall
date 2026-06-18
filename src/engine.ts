@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import type { Provenance, RecallRecord } from './record/schema.js';
 import { type LlmRunner, type SynthesizeOptions, synthesize } from './record/synthesizer.js';
+import { upsertToClaudeMem } from './surfaces/claude-mem.js';
 import type { Sidecar } from './surfaces/sidecar.js';
 import { computeSourceHash, writeRecordToTranscript } from './surfaces/transcript-writer.js';
 import { parseTranscriptText } from './transcript/parse.js';
@@ -77,6 +78,9 @@ export const indexSession = async (
     record,
     options.baseDir ? { baseDir: options.baseDir } : {},
   );
+
+  await upsertToClaudeMem(record, { onWarn: options.onWarn });
+
   return {
     sessionId: parsed.sessionId,
     title: record.title,

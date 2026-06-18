@@ -66,3 +66,5 @@
 # - github.token    → use GITHUB_TOKEN env var instead
 
 dolt.shared-server: true
+
+export.auto: true
