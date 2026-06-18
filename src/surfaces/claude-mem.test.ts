@@ -10,9 +10,11 @@ const respond = (body: unknown, ok = true, status = 200): ReturnType<FetchLike> 
   Promise.resolve({ ok, status, json: () => Promise.resolve(body) });
 
 const healthyFetch: FetchLike = (url) =>
-  url.includes('/api/health')
-    ? respond({ status: 'ok', version: '13.6.0', mcpReady: true })
-    : respond({ content: [{ type: 'text', text: 'a result' }] });
+  respond(
+    url.includes('/api/health')
+      ? { status: 'ok', version: '13.6.0', mcpReady: true }
+      : { content: [{ type: 'text', text: 'a result' }] },
+  );
 
 const refusingFetch: FetchLike = () => Promise.reject(new Error('ECONNREFUSED'));
 

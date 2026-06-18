@@ -1,7 +1,7 @@
 // cc-recall — transcript JSONL reader (spec §6).
 //
 // Reads a Claude Code `.jsonl` transcript into typed records and derives the session
-// metadata the synthesizer needs: dominant cwd, git branch, start/end timestamps
+// metadata the synthesizer needs: dominant cwd, Git branch, start/end timestamps
 // (from in-transcript records, NEVER mtime — spec §7), the latest ai-title, and the
 // genuine human prompts (separated from tool-results and SDK-injected prompts).
 
@@ -76,7 +76,7 @@ const genuinePrompt = (record: BaseRecord): UserPrompt | undefined => {
 
   const parts = contentParts(record.message);
   if (parts.some((p) => isToolResultPart(p))) return undefined;
-  if (!parts.some((p) => isTextPart(p))) return undefined;
+  if (parts.every((p) => !isTextPart(p))) return undefined;
 
   const text = messageText(record.message);
   if (!text || text.startsWith('<command-') || text.startsWith('Caveat:')) {
@@ -151,7 +151,7 @@ export const parseTranscriptText = (text: string, filePath?: string): ParsedTran
   const { records, parseErrors } = parseLines(text);
   const scan = scanRecords(records);
 
-  const timestamps = [...scan.timestamps].sort((a, b) => a.localeCompare(b));
+  const timestamps = scan.timestamps.toSorted((a, b) => a.localeCompare(b));
   const fallbackId = filePath ? path.basename(filePath).replace(/\.jsonl$/, '') : 'unknown';
 
   return {

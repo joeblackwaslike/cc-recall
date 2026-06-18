@@ -4,7 +4,7 @@
 // 127.0.0.1:37777 (configurable via CLAUDE_MEM_WORKER_PORT) backed by SQLite at
 // ~/.claude-mem/claude-mem.db, and already auto-observes every session via its own hooks.
 //
-// Read paths are stable public endpoints: GET /api/health, /api/readiness, /api/search.
+// Read paths are stable public endpoints: GET /API/health, /API/readiness, /API/search.
 // The WRITE path (observation_add → /v1/memories) is "server-beta runtime only" and would
 // duplicate claude-mem's own auto-observations — so cc-recall deliberately does NOT write
 // to claude-mem. Surface ③ is therefore a read-only coexistence + the G0 health gate; a
@@ -32,8 +32,8 @@ const errorMessage = (error: unknown): string =>
 
 const resolvePort = (port: number | undefined): number => {
   if (port !== undefined) return port;
-  const fromEnv = Number.parseInt(process.env.CLAUDE_MEM_WORKER_PORT ?? '', 10);
-  return Number.isNaN(fromEnv) ? DEFAULT_PORT : fromEnv;
+  const fromEnv = Number(process.env.CLAUDE_MEM_WORKER_PORT ?? '');
+  return Number.isNaN(fromEnv) || fromEnv === 0 ? DEFAULT_PORT : fromEnv;
 };
 
 const resolveFetch = (injected: FetchLike | undefined): FetchLike => injected ?? globalThis.fetch;

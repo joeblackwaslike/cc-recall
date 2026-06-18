@@ -53,6 +53,11 @@ const EDIT_TOOLS = new Set([
 
 const FILE_PATH_KEYS = ['file_path', 'filePath', 'notebook_path', 'path', 'relative_path'];
 
+const nowIso = (): string => {
+  const date = new Date();
+  return date.toISOString();
+};
+
 const truncate = (text: string, max: number): string =>
   text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`;
 
@@ -88,9 +93,11 @@ const deriveFilesTouched = (toolUses: readonly ToolUsePart[]): string[] => {
 const deriveTopTools = (toolUses: readonly ToolUsePart[]): ToolCount[] => {
   const counts = new Map<string, number>();
   for (const toolUse of toolUses) counts.set(toolUse.name, (counts.get(toolUse.name) ?? 0) + 1);
-  return [...counts.entries()]
+  return counts
+    .entries()
     .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .toArray()
+    .toSorted((a, b) => b.count - a.count || a.name.localeCompare(b.name))
     .slice(0, TOP_TOOLS_LIMIT);
 };
 
@@ -103,7 +110,7 @@ const detectHandoffIn = (parsed: ParsedTranscript): RecallRecord['handoff_in'] =
 };
 
 const lastSubstantialAssistantText = (records: readonly BaseRecord[]): string | undefined => {
-  for (const record of [...records].reverse()) {
+  for (const record of records.toReversed()) {
     if (!isAssistantRecord(record)) continue;
     const text = messageText(record.message);
     if (text.length > HANDOFF_MIN_LEN) return text;
@@ -163,7 +170,7 @@ export const synthesizeHeuristic = (input: SynthesisInput): RecallRecord => {
     },
     facets: { completed: [], questioned: [], asked_about: [] },
     provenance,
-    generated_at: input.generatedAt ?? new Date().toISOString(),
+    generated_at: input.generatedAt ?? nowIso(),
     synthesizer_version: SYNTHESIZER_VERSION,
   };
   // exactOptionalPropertyTypes: only set git_branch when present.
@@ -171,17 +178,19 @@ export const synthesizeHeuristic = (input: SynthesisInput): RecallRecord => {
   return record;
 };
 
+const stringArraySchema = z.array(z.string());
+
 const llmEnrichmentSchema = z.object({
   title: z.string().min(1),
   summary: z.string(),
-  asks_implemented: z.array(z.string()),
-  completions: z.array(z.string()),
+  asks_implemented: stringArraySchema,
+  completions: stringArraySchema,
   facets: z.object({
-    completed: z.array(z.string()),
-    questioned: z.array(z.string()),
-    asked_about: z.array(z.string()),
+    completed: stringArraySchema,
+    questioned: stringArraySchema,
+    asked_about: stringArraySchema,
   }),
-  distinctive_phrases: z.array(z.string()),
+  distinctive_phrases: stringArraySchema,
 });
 
 type LlmEnrichment = z.infer<typeof llmEnrichmentSchema>;
@@ -193,8 +202,8 @@ const buildDigest = (parsed: ParsedTranscript): string => {
       (prompt, index) =>
         `[ask ${index + 1}] ${truncate(prompt.text.replaceAll(/\s+/g, ' ').trim(), PROMPT_SNIPPET)}`,
     );
-  const completions = [...parsed.records]
-    .reverse()
+  const completions = parsed.records
+    .toReversed()
     .filter((record): record is AssistantRecord => isAssistantRecord(record))
     .map((record) => messageText(record.message))
     .filter((text) => text.length > HANDOFF_MIN_LEN)

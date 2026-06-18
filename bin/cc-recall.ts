@@ -24,7 +24,6 @@ import { openSidecar } from '../src/surfaces/sidecar.js';
 import { revertTranscript } from '../src/surfaces/transcript-writer.js';
 import { parseTranscriptText } from '../src/transcript/parse.js';
 
-const DECIMAL = 10;
 const PCT = 100;
 
 const DB_FLAG = '--db <path>';
@@ -103,7 +102,7 @@ const backfillOptionsFrom = (cli: BackfillCliOptions): BackfillOptions => {
   };
   if (!cli.llm) options.llm = false;
   if (cli.scope) options.scope = cli.scope;
-  if (cli.limit) options.limit = Number.parseInt(cli.limit, DECIMAL);
+  if (cli.limit) options.limit = Number(cli.limit);
   return options;
 };
 
@@ -150,7 +149,7 @@ const runMigrate = (options: MigrateCliOptions): void => {
 const runSearch = (query: string, options: SearchCliOptions): void => {
   const sidecar = openSidecar(options.db);
   try {
-    const hits = sidecar.search(query, Number.parseInt(options.limit, DECIMAL));
+    const hits = sidecar.search(query, Number(options.limit));
     if (hits.length === 0) {
       out('no matches');
       return;
@@ -201,7 +200,7 @@ const runFrontPage = (options: { db: string; out: string; topN: string }): void 
   try {
     const result = writeFrontPage(sidecar, {
       path: options.out,
-      topN: Number.parseInt(options.topN, DECIMAL),
+      topN: Number(options.topN),
       dbPath: options.db,
     });
     out(`front page: ${result.count} sessions → ${result.path}`);

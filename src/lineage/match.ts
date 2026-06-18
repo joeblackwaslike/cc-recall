@@ -110,8 +110,10 @@ export const scoreMatch = (textA: string, textB: string): number => {
 };
 
 const withinWindow = (fromTime: string, toTime: string): boolean => {
-  const from = new Date(fromTime).getTime();
-  const to = new Date(toTime).getTime();
+  const fromDate = new Date(fromTime);
+  const toDate = new Date(toTime);
+  const from = fromDate.getTime();
+  const to = toDate.getTime();
   return !Number.isNaN(from) && !Number.isNaN(to) && to >= from && to - from <= TIME_WINDOW_MS;
 };
 
