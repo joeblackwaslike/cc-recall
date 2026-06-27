@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RECALL_RECORD_TYPE, type RecallRecord } from '../record/schema.js';
 import { synthesizeHeuristic } from '../record/synthesizer.js';
 import { parseTranscriptText } from '../transcript/parse.js';
-import { revertTranscript, writeRecordToTranscript } from './transcript-writer.js';
+import { didRevertTranscript, writeRecordToTranscript } from './transcript-writer.js';
 
 const SESSION = 's-w';
 const native = `${[
@@ -59,13 +59,13 @@ describe('transcript-writer', () => {
 
   it('reverts to the pre-edit backup', () => {
     writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
-    expect(revertTranscript(file, SESSION, { baseDir: dir })).toBe(true);
+    expect(didRevertTranscript(file, SESSION, { baseDir: dir })).toBe(true);
     const reparsed = parseTranscriptText(readFileSync(file, 'utf8'), file);
     expect(reparsed.records.some((r) => r.type === RECALL_RECORD_TYPE)).toBe(false);
     expect(reparsed.aiTitle).toBe('native title');
   });
 
   it('returns false when reverting with no backup', () => {
-    expect(revertTranscript(file, 'never-written', { baseDir: dir })).toBe(false);
+    expect(didRevertTranscript(file, 'never-written', { baseDir: dir })).toBe(false);
   });
 });

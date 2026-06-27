@@ -14,8 +14,8 @@ import {
   verifyClaudeMemG0,
 } from './claude-mem.js';
 
-const respond = (body: unknown, ok = true, status = 200): ReturnType<FetchLike> =>
-  Promise.resolve({ ok, status, json: () => Promise.resolve(body) });
+const respond = (body: unknown, isOk = true, status = 200): ReturnType<FetchLike> =>
+  Promise.resolve({ ok: isOk, status, json: () => Promise.resolve(body) });
 
 const healthyFetch: FetchLike = (url) =>
   respond(
@@ -288,9 +288,9 @@ describe('upsertObservation', () => {
     );
     expect(obs1.content_hash).not.toBe(obs2.content_hash);
 
-    const stmt = db.prepare(INSERT_SQL);
-    stmt.run(toParameters(obs1));
-    stmt.run(toParameters(obs2));
+    const statement = db.prepare(INSERT_SQL);
+    statement.run(toParameters(obs1));
+    statement.run(toParameters(obs2));
 
     const count = db.prepare(COUNT_OBS_SQL).get() as { n: number };
     expect(count.n).toBe(2);

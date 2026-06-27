@@ -68,12 +68,12 @@ const escapeRegExp = (text: string): string =>
 
 const defaults = (
   options: MigrateOptions,
-): { from: string; to: string; projectsRoot: string; baseDir: string; dryRun: boolean } => ({
+): { from: string; to: string; projectsRoot: string; baseDir: string; isDryRun: boolean } => ({
   from: options.from ?? DEFAULT_FROM,
   to: options.to ?? DEFAULT_TO,
   projectsRoot: options.projectsRoot ?? path.join(homedir(), '.claude', 'projects'),
   baseDir: options.baseDir ?? path.join(homedir(), '.claude', 'cc-recall'),
-  dryRun: options.dryRun ?? true,
+  isDryRun: options.dryRun ?? true,
 });
 
 /** Slug dirs under the old home, paired with their new-home destination. */
@@ -91,25 +91,25 @@ const planDirectories = (projectsRoot: string, from: string, to: string): DirMov
   return moves;
 };
 
-const mergeDir = (move: DirMove, dryRun: boolean): FileMerge[] => {
+const mergeDir = (move: DirMove, isDryRun: boolean): FileMerge[] => {
   const merges: FileMerge[] = [];
   for (const file of readdirSync(move.from)) {
     const from = path.join(move.from, file);
     const to = path.join(move.to, file);
-    const collision = existsSync(to);
-    merges.push({ from, to, collision });
-    if (!dryRun && !collision) renameSync(from, to);
+    const isCollision = existsSync(to);
+    merges.push({ from, to, collision: isCollision });
+    if (!isDryRun && !isCollision) renameSync(from, to);
   }
-  if (!dryRun && readdirSync(move.from).length === 0) rmdirSync(move.from);
+  if (!isDryRun && readdirSync(move.from).length === 0) rmdirSync(move.from);
   return merges;
 };
 
-const applyDirectories = (moves: readonly DirMove[], dryRun: boolean): FileMerge[] => {
+const applyDirectories = (moves: readonly DirMove[], isDryRun: boolean): FileMerge[] => {
   const merges: FileMerge[] = [];
   for (const move of moves) {
     if (existsSync(move.to)) {
-      merges.push(...mergeDir(move, dryRun));
-    } else if (!dryRun) {
+      merges.push(...mergeDir(move, isDryRun));
+    } else if (!isDryRun) {
       renameSync(move.from, move.to);
     }
   }
@@ -130,9 +130,9 @@ const jsonlFilesIn = (dir: string): string[] =>
 const rewriteTargets = (
   moves: readonly DirMove[],
   merges: readonly FileMerge[],
-  dryRun: boolean,
+  isDryRun: boolean,
 ): string[] => {
-  const key: 'from' | 'to' = dryRun ? 'from' : 'to';
+  const key: 'from' | 'to' = isDryRun ? 'from' : 'to';
   const merged = merges
     .filter((m) => !m.collision)
     .map((m) => m[key])
@@ -145,14 +145,14 @@ const rewriteFile = (
   file: string,
   from: string,
   to: string,
-  dryRun: boolean,
+  isDryRun: boolean,
   baseDir: string,
 ): number => {
   const text = readFileSync(file, 'utf8');
   // Only rewrite the home when it is the start of a path (followed by `/` or a closing quote).
   const pattern = new RegExp(`${escapeRegExp(from)}(?=[/"])`, 'g');
   const count = text.matchAll(pattern).toArray().length;
-  if (count === 0 || dryRun) return count;
+  if (count === 0 || isDryRun) return count;
 
   const origErrors = parseTranscriptText(text, file).parseErrors;
   const backupPath = path.join(baseDir, REWRITE_BACKUPS, path.basename(file));
@@ -173,18 +173,18 @@ const rewriteFile = (
 
 /** Run (or preview) the home-path migration. Dry-run by default. */
 export const migrateHomePaths = (options: MigrateOptions = {}): MigrateManifest => {
-  const { from, to, projectsRoot, baseDir, dryRun } = defaults(options);
+  const { from, to, projectsRoot, baseDir, isDryRun } = defaults(options);
   const dirMoves = planDirectories(projectsRoot, from, to);
-  const fileMerges = applyDirectories(dirMoves, dryRun);
+  const fileMerges = applyDirectories(dirMoves, isDryRun);
 
   const rewrites: FileRewrite[] = [];
-  for (const file of rewriteTargets(dirMoves, fileMerges, dryRun)) {
-    const count = rewriteFile(file, from, to, dryRun, baseDir);
+  for (const file of rewriteTargets(dirMoves, fileMerges, isDryRun)) {
+    const count = rewriteFile(file, from, to, isDryRun, baseDir);
     if (count > 0) rewrites.push({ file, count });
   }
 
-  const manifest: MigrateManifest = { from, to, dryRun, dirMoves, fileMerges, rewrites };
-  if (!dryRun) {
+  const manifest: MigrateManifest = { from, to, dryRun: isDryRun, dirMoves, fileMerges, rewrites };
+  if (!isDryRun) {
     mkdirSync(baseDir, { recursive: true });
     writeFileSync(path.join(baseDir, MANIFEST_NAME), JSON.stringify(manifest, null, 2));
   }

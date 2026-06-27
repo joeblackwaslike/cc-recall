@@ -89,7 +89,7 @@ export default tseslint.config(
           enforceConst: true,
         },
       ],
-      'unicorn/prevent-abbreviations': [
+      'unicorn/name-replacements': [
         'error',
         {
           replacements: {

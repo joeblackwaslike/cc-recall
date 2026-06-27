@@ -56,10 +56,12 @@ const dominant = (values: readonly string[]): string | undefined => {
   let best: string | undefined;
   let bestCount = 0;
   for (const [value, count] of counts) {
-    if (count > bestCount) {
-      best = value;
-      bestCount = count;
+    if (count <= bestCount) {
+      continue;
     }
+
+    best = value;
+    bestCount = count;
   }
   return best;
 };

@@ -119,7 +119,7 @@ const atomicWrite = (filePath: string, content: string): void => {
   renameSync(tmp, filePath);
 };
 
-const passesIntegrity = (filePath: string, record: RecallRecord, origErrors: number): boolean => {
+const isIntegrityValid = (filePath: string, record: RecallRecord, origErrors: number): boolean => {
   const reparsed = parseTranscriptText(readFileSync(filePath, 'utf8'), filePath);
   return (
     reparsed.parseErrors === origErrors &&
@@ -151,7 +151,7 @@ export const writeRecordToTranscript = (
   ensureBackup(filePath, backupPath);
   atomicWrite(filePath, buildContent(kept, record, sourceHash));
 
-  if (!passesIntegrity(filePath, record, origErrors)) {
+  if (!isIntegrityValid(filePath, record, origErrors)) {
     copyFileSync(backupPath, filePath); // auto-restore
     throw new Error(`integrity check failed for ${record.session_id}; restored from backup`);
   }
@@ -159,7 +159,7 @@ export const writeRecordToTranscript = (
 };
 
 /** Restore a transcript from its backup. Returns false if no backup exists. */
-export const revertTranscript = (
+export const didRevertTranscript = (
   filePath: string,
   sessionId: string,
   options: WriteOptions = {},
