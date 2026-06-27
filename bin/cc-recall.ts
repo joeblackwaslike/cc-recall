@@ -17,6 +17,7 @@ import {
   coverage,
   indexSession,
 } from '../src/engine.js';
+import { logSearchQuery, readAdoptionMetrics } from '../src/metrics/adoption.js';
 import { migrateHomePaths, revertHomePaths } from '../src/migrate/home-path.js';
 import { verifyClaudeMemG0 } from '../src/surfaces/claude-mem.js';
 import { defaultFrontPagePath, writeFrontPage } from '../src/surfaces/native-memory.js';
@@ -150,6 +151,7 @@ const runSearch = (query: string, options: SearchCliOptions): void => {
   const sidecar = openSidecar(options.db);
   try {
     const hits = sidecar.search(query, Number(options.limit));
+    logSearchQuery(hits.length);
     if (hits.length === 0) {
       out('no matches');
       return;
@@ -282,6 +284,33 @@ program
   .option('--top-n <n>', 'number of sessions to list', '25')
   .action((options: { db: string; out: string; topN: string }) => {
     runFrontPage(options);
+  });
+
+program
+  .command('adoption')
+  .description('Report adoption metrics (hook fires, search usage, hit rate)')
+  .action(() => {
+    const report = readAdoptionMetrics();
+    if (report.daysTracked === 0) {
+      out(
+        'no adoption data yet — metrics start accumulating after the first intent detection or search',
+      );
+      return;
+    }
+    out(`adoption metrics (${report.daysTracked} days tracked)`);
+    out(`  first event: ${report.firstEvent ?? 'n/a'}`);
+    out(`  last event:  ${report.lastEvent ?? 'n/a'}`);
+    out(`  intent detections: ${report.totalIntents} (${report.intentsPerDay.toFixed(1)}/day)`);
+    out(`  searches:          ${report.totalSearches} (${report.searchesPerDay.toFixed(1)}/day)`);
+    out(
+      `  search hit rate:   ${(report.hitRate * PCT).toFixed(0)}% (${report.searchesWithHits} hits, ${report.searchesWithMisses} misses)`,
+    );
+    const hitRateThreshold = 0.8;
+    if (report.hitRate >= hitRateThreshold) {
+      out('  verdict: sidecar search is effective — no dedicated tool needed yet');
+    } else if (report.totalSearches > 0) {
+      out('  verdict: hit rate below 80% — consider a dedicated find-session tool');
+    }
   });
 
 await program.parseAsync(process.argv);
