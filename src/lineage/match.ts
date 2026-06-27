@@ -98,18 +98,18 @@ const tokenize = (text: string): Set<string> => {
  * than 3 chars, computes set intersection / set union.
  */
 export const scoreMatch = (textA: string, textB: string): number => {
-  const setA = tokenize(textA);
-  const setB = tokenize(textB);
-  if (setA.size === 0 || setB.size === 0) return 0;
+  const tokensA = tokenize(textA);
+  const tokensB = tokenize(textB);
+  if (tokensA.size === 0 || tokensB.size === 0) return 0;
   let intersection = 0;
-  for (const token of setA) {
-    if (setB.has(token)) intersection += 1;
+  for (const token of tokensA) {
+    if (tokensB.has(token)) intersection += 1;
   }
-  const union = setA.size + setB.size - intersection;
+  const union = tokensA.size + tokensB.size - intersection;
   return union === 0 ? 0 : intersection / union;
 };
 
-const withinWindow = (fromTime: string, toTime: string): boolean => {
+const isWithinWindow = (fromTime: string, toTime: string): boolean => {
   const fromDate = new Date(fromTime);
   const toDate = new Date(toTime);
   const from = fromDate.getTime();
@@ -134,7 +134,7 @@ export const resolveHandoffOut = (
   let bestScore = MATCH_THRESHOLD;
   for (const candidate of candidates) {
     if (candidate.session_id === source.session_id) continue;
-    if (!withinWindow(source.ended_at, candidate.started_at)) continue;
+    if (!isWithinWindow(source.ended_at, candidate.started_at)) continue;
     const score = scoreMatch(source.handoff_out.text, candidate.title);
     if (score > bestScore) {
       bestScore = score;
@@ -161,7 +161,7 @@ export const resolveHandoffIn = (
   let bestScore = MATCH_THRESHOLD;
   for (const candidate of candidates) {
     if (candidate.session_id === target.session_id) continue;
-    if (!withinWindow(candidate.ended_at, target.started_at)) continue;
+    if (!isWithinWindow(candidate.ended_at, target.started_at)) continue;
     const score = scoreMatch(target.handoff_in.text, candidate.title);
     if (score > bestScore) {
       bestScore = score;

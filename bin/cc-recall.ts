@@ -21,7 +21,7 @@ import { migrateHomePaths, revertHomePaths } from '../src/migrate/home-path.js';
 import { verifyClaudeMemG0 } from '../src/surfaces/claude-mem.js';
 import { defaultFrontPagePath, writeFrontPage } from '../src/surfaces/native-memory.js';
 import { openSidecar } from '../src/surfaces/sidecar.js';
-import { revertTranscript } from '../src/surfaces/transcript-writer.js';
+import { didRevertTranscript } from '../src/surfaces/transcript-writer.js';
 import { parseTranscriptText } from '../src/transcript/parse.js';
 
 const PCT = 100;
@@ -162,8 +162,8 @@ const runSearch = (query: string, options: SearchCliOptions): void => {
 
 const runRevert = (file: string, options: { baseDir: string }): void => {
   const parsed = parseTranscriptText(readFileSync(file, 'utf8'), file);
-  const reverted = revertTranscript(file, parsed.sessionId, { baseDir: options.baseDir });
-  out(reverted ? `reverted ${parsed.sessionId}` : `no backup for ${parsed.sessionId}`);
+  const isReverted = didRevertTranscript(file, parsed.sessionId, { baseDir: options.baseDir });
+  out(isReverted ? `reverted ${parsed.sessionId}` : `no backup for ${parsed.sessionId}`);
 };
 
 const reportSidecar = (db: string): void => {
