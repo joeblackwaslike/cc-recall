@@ -101,7 +101,7 @@ describe('parseTranscriptText', () => {
   it('counts unparseable lines without throwing', () => {
     const parsed = parseTranscriptText(`${transcript}\nnot json\n{"type":"x"`);
     expect(parsed.parseErrors).toBe(2);
-    expect(parsed.records.length).toBe(lines.length);
+    expect(parsed.records).toHaveLength(lines.length);
   });
 
   it('falls back to the filename for session id when records lack one', () => {
