@@ -128,11 +128,11 @@ export const verifyClaudeMemG0 = async (options: ClaudeMemOptions = {}): Promise
   }
   const search = await searchClaudeMem('cc-recall g0 probe', { ...options, limit: 1 });
   // health.reachable is already guaranteed true by the early return above.
-  const pass = health.ready && search.ok;
-  const detail = pass
+  const isPassing = health.ready && search.ok;
+  const detail = isPassing
     ? 'health + readiness + search round-trip OK'
     : (search.error ?? 'worker not ready');
-  return { pass, health, searchOk: search.ok, detail };
+  return { pass: isPassing, health, searchOk: search.ok, detail };
 };
 
 // ---------------------------------------------------------------------------
@@ -297,8 +297,8 @@ export const upsertObservation = (record: RecallRecord, dbPath: string): UpsertR
       $created_at: obs.created_at,
       $created_at_epoch: obs.created_at_epoch,
     });
-    const inserted = result.changes > 0;
-    return { ok: true, inserted, error: undefined };
+    const wasInserted = result.changes > 0;
+    return { ok: true, inserted: wasInserted, error: undefined };
   } catch (error) {
     return { ok: false, inserted: false, error: errorMessage(error) };
   } finally {
