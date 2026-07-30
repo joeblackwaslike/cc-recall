@@ -10,7 +10,13 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { Provenance, RecallRecord } from './record/schema.js';
-import { type LlmRunner, type SynthesizeOptions, synthesize } from './record/synthesizer.js';
+import {
+  INDEXER_CWD,
+  type LlmRunner,
+  type SynthesizeOptions,
+  isIndexerTranscript,
+  synthesize,
+} from './record/synthesizer.js';
 import { upsertToClaudeMem } from './surfaces/claude-mem.js';
 import type { Sidecar } from './surfaces/sidecar.js';
 import { computeSourceHash, writeRecordToTranscript } from './surfaces/transcript-writer.js';
@@ -20,6 +26,12 @@ export const defaultProjectsRoot = (): string => path.join(homedir(), '.claude',
 
 /** The encoded-cwd project dir name a transcript lives under. */
 export const projectFromPath = (filePath: string): string => path.basename(path.dirname(filePath));
+
+/** Claude Code encodes a cwd into a project dir name by replacing `/` and `.` with `-`. */
+const encodeProjectDir = (cwd: string): string => cwd.replaceAll(/[/.]/g, '-');
+
+/** Project dir holding the enrichment subprocesses' own transcripts; never indexed. */
+export const INDEXER_PROJECT_DIR = encodeProjectDir(INDEXER_CWD);
 
 export interface IndexOptions {
   provenance?: Provenance;
@@ -55,6 +67,14 @@ export const indexSession = async (
 ): Promise<IndexResult> => {
   const text = readFileSync(filePath, 'utf8');
   const parsed = parseTranscriptText(text, filePath);
+
+  // Enrichment runs predating the dedicated indexer cwd are scattered across real project
+  // dirs, so the dir-level skip cannot catch them. Recognize them by prompt and drop them:
+  // indexing our own output yields no retrievable session and feeds the corpus back to itself.
+  if (isIndexerTranscript(parsed.firstUserPrompt?.text)) {
+    return { sessionId: parsed.sessionId, title: '(indexer run)', written: false, skipped: true };
+  }
+
   const sourceHash = computeSourceHash(text);
 
   if (!options.force && sidecar.getSourceHash(parsed.sessionId) === sourceHash) {
@@ -109,6 +129,7 @@ export const listTranscripts = (projectsRoot: string, scope?: string): string[] 
     return [];
   }
   for (const dir of directories) {
+    if (dir === INDEXER_PROJECT_DIR) continue;
     if (scope && !dir.includes(scope)) continue;
     files.push(...transcriptsInDir(path.join(projectsRoot, dir)));
   }

@@ -1,0 +1,219 @@
+// Regression suite for the enrichment-subprocess cost/loop defects.
+//
+// A backfill run spawned ~2,825 headless sessions in ~43h, consuming an estimated 69% of a
+// weekly quota. Three compounding defects: the subprocess inherited the interactive model
+// (~20x unit cost), inherited the full settings prefix (~24x context over payload), and wrote
+// its own transcript into the corpus it was consuming — so the work queue could never drain.
+//
+// The convergence test at the bottom is the one that pins the bug class; the rest check the
+// mechanics that produce it.
+
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+type Handler = (...args: unknown[]) => void;
+
+interface Emitter {
+  on: (event: string, callback: Handler) => void;
+  fire: (event: string, ...args: unknown[]) => void;
+}
+
+/** Minimal stand-in for the child_process event surface `runClaudeHeadless` actually uses. */
+const emitter = (): Emitter => {
+  const handlers = new Map<string, Handler>();
+  return {
+    on: (event: string, callback: Handler) => {
+      handlers.set(event, callback);
+    },
+    fire: (event: string, ...args: unknown[]) => handlers.get(event)?.(...args),
+  };
+};
+
+const { spawnCalls, stdinWrites, killSignals } = vi.hoisted(() => ({
+  spawnCalls: [] as { command: string; args: string[]; options: Record<string, unknown> }[],
+  stdinWrites: [] as string[],
+  killSignals: [] as unknown[],
+}));
+
+const ENRICHMENT_JSON = JSON.stringify({
+  title: 'stub',
+  summary: 'stub',
+  asks_implemented: [],
+  completions: [],
+  facets: { completed: [], questioned: [], asked_about: [] },
+  distinctive_phrases: [],
+});
+
+vi.mock('node:child_process', () => ({
+  spawn: (command: string, args: string[], options: Record<string, unknown>) => {
+    spawnCalls.push({ command, args, options });
+    const stdout = emitter();
+    const child = {
+      ...emitter(),
+      stdout,
+      stderr: emitter(),
+      stdin: {
+        ...emitter(),
+        end: (data: unknown) => {
+          stdinWrites.push(String(data));
+        },
+      },
+      kill: (signal: unknown) => {
+        killSignals.push(signal);
+      },
+    };
+    queueMicrotask(() => {
+      stdout.fire('data', Buffer.from(ENRICHMENT_JSON));
+      child.fire('close', 0);
+    });
+    return child;
+  },
+}));
+
+const { INDEXER_CWD, isIndexerTranscript, runClaudeHeadless } = await import(
+  './record/synthesizer.js'
+);
+const { INDEXER_PROJECT_DIR, backfill, indexSession, listTranscripts } = await import(
+  './engine.js'
+);
+const { openSidecar } = await import('./surfaces/sidecar.js');
+
+const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
+const REAL_PROJECT_DIR = '-Users-joe-proj';
+
+const transcriptOf = (sessionId: string, firstPrompt: string): string =>
+  `${JSON.stringify({
+    type: 'user',
+    sessionId,
+    cwd: '/Users/joe/proj',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    message: { role: 'user', content: [{ type: 'text', text: firstPrompt }] },
+  })}\n`;
+
+// Verbatim opening line of the enrichment prompt — a historical indexer transcript looks
+// exactly like this, which is the only way to recognise runs written before INDEXER_CWD existed.
+const INDEXER_PROMPT =
+  'You are indexing a Claude Code session transcript so it can be found later by what\nwas DONE, ASKED, and QUESTIONED.';
+
+describe('enrichment subprocess invocation', () => {
+  beforeEach(() => {
+    spawnCalls.length = 0;
+    stdinWrites.length = 0;
+    vi.stubEnv('CC_RECALL_MODEL', undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('pins the model instead of inheriting the interactive default', async () => {
+    await runClaudeHeadless('prompt');
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]?.args).toEqual(['-p', '--model', DEFAULT_MODEL]);
+  });
+
+  it('honours CC_RECALL_MODEL without a module reload', async () => {
+    vi.stubEnv('CC_RECALL_MODEL', 'claude-sonnet-5');
+    await runClaudeHeadless('prompt');
+    expect(spawnCalls[0]?.args).toEqual(['-p', '--model', 'claude-sonnet-5']);
+  });
+
+  it('runs in the dedicated indexer cwd so its own transcript is excludable', async () => {
+    await runClaudeHeadless('prompt');
+    expect(spawnCalls[0]?.options.cwd).toBe(INDEXER_CWD);
+  });
+
+  it('still delivers the prompt over stdin', async () => {
+    await runClaudeHeadless('summarise this');
+    expect(stdinWrites).toEqual(['summarise this']);
+  });
+});
+
+describe('isIndexerTranscript', () => {
+  it('recognises an enrichment run by its opening prompt', () => {
+    expect(isIndexerTranscript(INDEXER_PROMPT)).toBe(true);
+  });
+
+  it('tolerates leading whitespace', () => {
+    expect(isIndexerTranscript(`\n  ${INDEXER_PROMPT}`)).toBe(true);
+  });
+
+  it('does not match ordinary sessions or undefined', () => {
+    expect(isIndexerTranscript('index the users table')).toBe(false);
+    expect(isIndexerTranscript(undefined)).toBe(false);
+  });
+});
+
+describe('corpus exclusion and convergence', () => {
+  let root: string;
+  let baseDir: string;
+  let sidecar: ReturnType<typeof openSidecar>;
+
+  const writeTranscript = (dir: string, id: string, prompt: string): string => {
+    mkdirSync(path.join(root, dir), { recursive: true });
+    const file = path.join(root, dir, `${id}.jsonl`);
+    writeFileSync(file, transcriptOf(id, prompt));
+    return file;
+  };
+
+  beforeEach(() => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-iso-'));
+    root = path.join(tmp, 'projects');
+    baseDir = path.join(tmp, 'base');
+    mkdirSync(root, { recursive: true });
+    sidecar = openSidecar(':memory:');
+  });
+  afterEach(() => {
+    sidecar.close();
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  it('excludes the indexer project dir from enumeration', () => {
+    writeTranscript(REAL_PROJECT_DIR, 'real', 'wire up the engine');
+    writeTranscript(INDEXER_PROJECT_DIR, 'enrich', INDEXER_PROMPT);
+    expect(listTranscripts(root).map((f) => path.basename(f))).toEqual(['real.jsonl']);
+  });
+
+  it('skips a historical indexer transcript sitting in a real project dir', async () => {
+    const file = writeTranscript(REAL_PROJECT_DIR, 'stray', INDEXER_PROMPT);
+    const result = await indexSession(file, sidecar, { llm: false, baseDir });
+    expect(result.skipped).toBe(true);
+    expect(result.written).toBe(false);
+    expect(sidecar.get('stray')).toBeUndefined();
+  });
+
+  it('does not invoke the LLM for an indexer transcript', async () => {
+    const file = writeTranscript(REAL_PROJECT_DIR, 'stray', INDEXER_PROMPT);
+    let wasCalled = false;
+    await indexSession(file, sidecar, {
+      baseDir,
+      llm: () => {
+        wasCalled = true;
+        return Promise.resolve(ENRICHMENT_JSON);
+      },
+    });
+    expect(wasCalled).toBe(false);
+  });
+
+  // The invariant the original defect violated: every enrichment run wrote a transcript back
+  // into the corpus, so the queue grew as fast as it drained and backfill never terminated.
+  it('reaches a fixed point — enrichment output does not become new work', async () => {
+    writeTranscript(REAL_PROJECT_DIR, 'real', 'wire up the engine');
+    const before = listTranscripts(root).length;
+
+    const first = await backfill(sidecar, { projectsRoot: root, baseDir, llm: false });
+    expect(first.written).toBe(1);
+
+    // Simulate the side effect of that run: the subprocess writes its own transcript, plus a
+    // stray one landing in a real project dir the way pre-fix runs did.
+    writeTranscript(INDEXER_PROJECT_DIR, 'enrich-1', INDEXER_PROMPT);
+    writeTranscript(REAL_PROJECT_DIR, 'enrich-stray', INDEXER_PROMPT);
+
+    expect(listTranscripts(root)).toHaveLength(before + 1); // only the stray is even visible
+
+    const second = await backfill(sidecar, { projectsRoot: root, baseDir, llm: false });
+    expect(second.written).toBe(0); // nothing new was real work
+    expect(listTranscripts(root)).toHaveLength(before + 1); // and the queue did not grow again
+  });
+});

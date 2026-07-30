@@ -9,6 +9,9 @@
 // retrieval never depends on the LLM being available (AGENTS.md).
 
 import { spawn } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import { z } from 'zod';
 import type { ParsedTranscript } from '../transcript/parse.js';
 import {
@@ -37,6 +40,36 @@ const LLM_TIMEOUT_MS = 60_000;
 const MAX_DIGEST_PROMPTS = 12;
 const PROMPT_SNIPPET = 500;
 const MAX_DIGEST_COMPLETIONS = 4;
+
+// Enrichment is a summarize-to-JSON task over a ~4k digest. It must not inherit the
+// user's interactive model: an Opus-class default costs roughly 20x per call here for
+// no measurable gain on structured extraction. Override via CC_RECALL_MODEL.
+const DEFAULT_INDEXER_MODEL = 'claude-haiku-4-5-20251001';
+
+/** Resolved per call so an override takes effect without a module reload. */
+const indexerModel = (): string => process.env.CC_RECALL_MODEL ?? DEFAULT_INDEXER_MODEL;
+
+/**
+ * Dedicated cwd for enrichment subprocesses.
+ *
+ * `claude -p` always writes a transcript of its own run. Inheriting the caller's cwd
+ * scatters those beside real sessions, so the backfill re-indexes its own output and the
+ * corpus grows as fast as it is consumed — the queue never drains. Pinning a cwd puts
+ * every indexer run in one project dir that `listTranscripts` can skip wholesale.
+ */
+export const INDEXER_CWD = path.join(homedir(), '.claude', 'cc-recall', 'indexer');
+
+/**
+ * Opening line of the enrichment prompt, used both to build it and to recognize an
+ * indexer run when re-encountering one. Kept as a constant so the two cannot drift:
+ * detection must keep matching transcripts written before the dedicated cwd existed.
+ */
+const INDEXER_PROMPT_FIRST_LINE =
+  'You are indexing a Claude Code session transcript so it can be found later by what';
+
+/** Whether a transcript's opening prompt marks it as one of our own enrichment runs. */
+export const isIndexerTranscript = (firstUserPrompt: string | undefined): boolean =>
+  firstUserPrompt?.trimStart().startsWith(INDEXER_PROMPT_FIRST_LINE) ?? false;
 
 /** Tools whose invocation means a file was created or modified. */
 const EDIT_TOOLS = new Set([
@@ -223,7 +256,7 @@ const buildDigest = (parsed: ParsedTranscript): string => {
 
 const buildLlmPrompt = (parsed: ParsedTranscript): string =>
   [
-    'You are indexing a Claude Code session transcript so it can be found later by what',
+    INDEXER_PROMPT_FIRST_LINE,
     'was DONE, ASKED, and QUESTIONED. Read the digest and reply with ONLY a JSON object',
     '(no prose, no code fences) of this exact shape:',
     '{"title":"<=80 chars, what was actually done (not how it started)",',
@@ -249,8 +282,12 @@ export type LlmRunner = (prompt: string) => Promise<string>;
 /** Default runner: pipe the prompt to `claude -p` over stdin. */
 export const runClaudeHeadless: LlmRunner = (prompt) =>
   new Promise<string>((resolve, reject) => {
+    mkdirSync(INDEXER_CWD, { recursive: true });
     // eslint-disable-next-line sonarjs/no-os-command-from-path -- intentionally invoke the user's installed `claude` CLI via PATH
-    const child = spawn('claude', ['-p'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('claude', ['-p', '--model', indexerModel()], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: INDEXER_CWD,
+    });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
