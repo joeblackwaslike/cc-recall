@@ -10,7 +10,15 @@
 //   CC_RECALL_BASE_DIR=<path>  backup/log base directory
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -75,6 +83,17 @@ if (!transcriptPath || !pluginRoot) {
   if (process.env.CC_RECALL_DB) args.push('--db', process.env.CC_RECALL_DB);
   if (process.env.CC_RECALL_LLM === '0' || process.env.CC_RECALL_LLM === 'false') {
     args.push('--no-llm');
+  }
+
+  // Spawning a missing entrypoint produces a "Cannot find module" stack trace per session, in a
+  // detached process nobody reads — 4,897 of them accumulated while forward capture was dead.
+  // One actionable line beats thousands of identical traces.
+  if (!existsSync(cli)) {
+    process.stderr.write(
+      `cc-recall session-end: ${cli} is missing, so this session was not indexed. The SessionStart build likely failed — see ${path.join(baseDir, 'logs', 'build.log')}.\n`,
+    );
+    proceed();
+    process.exit(0);
   }
 
   try {
