@@ -62,6 +62,7 @@ interface BackfillCliOptions extends DbOptions {
   dryRun?: boolean;
   force?: boolean;
   maxLlmCalls?: string;
+  onlyHeuristic?: boolean;
 }
 interface MigrateCliOptions {
   from: string;
@@ -106,6 +107,7 @@ const backfillOptionsFrom = (cli: BackfillCliOptions): BackfillOptions => {
   if (cli.scope) options.scope = cli.scope;
   if (cli.limit) options.limit = Number(cli.limit);
   if (cli.maxLlmCalls) options.maxLlmCalls = Number(cli.maxLlmCalls);
+  if (cli.onlyHeuristic) options.onlyHeuristic = true;
   return options;
 };
 
@@ -297,6 +299,7 @@ program
   .option('--scope <substring>', 'only project dirs containing this substring')
   .option('--limit <n>', 'stop after N transcripts')
   .option('--max-llm-calls <n>', 'hard ceiling on LLM calls (--limit caps files, not spend)')
+  .option('--only-heuristic', 're-synthesize only sessions whose record is not LLM-enriched')
   .option(NO_LLM_FLAG, NO_LLM_DESC)
   .option('--dry-run', DRY_RUN_DESC)
   .option('--force', FORCE_DESC)

@@ -25,6 +25,7 @@ import {
 import type { Sidecar } from './surfaces/sidecar.js';
 import {
   type WriteOptions,
+  type WriteResult,
   computeSourceHash,
   writeRecordToTranscript,
 } from './surfaces/transcript-writer.js';
@@ -71,6 +72,14 @@ export interface IndexOptions {
   skipClaudeMem?: boolean;
   /** Reports whether the LLM pass succeeded, so a batch caller can meter spend and degradation. */
   onLlmOutcome?: (outcome: { ok: boolean; error?: string }) => void;
+  /**
+   * Only re-synthesize sessions whose stored record is not LLM-enriched.
+   *
+   * The repair path for a degraded corpus. Without it, fixing N degraded sessions costs a full
+   * re-run over every session, which is the same "only remedy is the most expensive one" shape
+   * that caused the original incident.
+   */
+  onlyHeuristic?: boolean;
 }
 
 export interface IndexResult {
@@ -105,6 +114,50 @@ const writeToClaudeMem = async (record: RecallRecord, options: IndexOptions): Pr
   await upsertToClaudeMem(record, upsertOptions);
 };
 
+/**
+ * Repair-mode filter: in `--only-heuristic`, skip sessions already carrying an LLM-enriched record.
+ *
+ * Reading the transcript is cheap; the LLM call is not. Deciding here rather than after synthesis
+ * is what separates an 8,673-call repair from a 56,037-call one — the same "only remedy is the
+ * most expensive one" shape that caused the original incident.
+ *
+ * A record with no `enrichment` field predates the field and counts as a candidate: absent means
+ * unknown, and unknown is not the same as enriched.
+ */
+const isAlreadyEnriched = (sidecar: Sidecar, sessionId: string, options: IndexOptions): boolean =>
+  Boolean(options.onlyHeuristic) && sidecar.get(sessionId)?.enrichment === 'llm';
+
+/**
+ * Write the record into the transcript, surfacing the one skip that is not a no-op.
+ *
+ * `expectedSourceHash` is the hash the record was actually synthesized from, so the writer can
+ * refuse to stamp it onto a transcript the session has grown past mid-synthesis. `force` has to
+ * reach the writer too: it bypasses the *sidecar* hash check so synthesis re-runs, but the writer
+ * keeps its own idempotency check, and leaving the two out of step meant `--force` spent the whole
+ * LLM budget and wrote nothing.
+ */
+const writeToTranscript = (
+  filePath: string,
+  record: RecallRecord,
+  sourceHash: string,
+  options: IndexOptions,
+): WriteResult => {
+  const writeOptions: WriteOptions = { expectedSourceHash: sourceHash };
+  if (options.baseDir) writeOptions.baseDir = options.baseDir;
+  if (options.force) writeOptions.force = true;
+  const write = writeRecordToTranscript(filePath, record, writeOptions);
+
+  // A stale-source skip is transient, not a no-op: the sidecar was updated but the transcript was
+  // not, so this session needs re-indexing once it goes idle. Surfacing it is what makes that
+  // recoverable — reporting "skipped" hides a real inconsistency between the two surfaces.
+  if (write.skipReason === 'stale-source') {
+    options.onWarn?.(
+      `transcript grew during synthesis; in-transcript record not updated: ${filePath}`,
+    );
+  }
+  return write;
+};
+
 export const indexSession = async (
   filePath: string,
   sidecar: Sidecar,
@@ -126,6 +179,15 @@ export const indexSession = async (
     return { sessionId: parsed.sessionId, title: '(unchanged)', written: false, skipped: true };
   }
 
+  if (isAlreadyEnriched(sidecar, parsed.sessionId, options)) {
+    return {
+      sessionId: parsed.sessionId,
+      title: '(already enriched)',
+      written: false,
+      skipped: true,
+    };
+  }
+
   const input = {
     parsed,
     project: projectFromPath(filePath),
@@ -138,25 +200,7 @@ export const indexSession = async (
   }
 
   sidecar.upsert(record, sourceHash);
-  // Pass the hash of the content the record was actually synthesized from, so the writer can
-  // refuse to stamp it onto a transcript the session has grown past during synthesis.
-  const writeOptions: WriteOptions = { expectedSourceHash: sourceHash };
-  if (options.baseDir) writeOptions.baseDir = options.baseDir;
-  // `force` has to reach the writer too. It bypasses the sidecar hash check above so synthesis
-  // re-runs, but the writer keeps its own idempotency check — leaving them out of step meant
-  // --force spent the LLM budget and wrote nothing.
-  if (options.force) writeOptions.force = true;
-  const write = writeRecordToTranscript(filePath, record, writeOptions);
-
-  // A stale-source skip is transient, not a no-op: the sidecar was updated but the transcript
-  // was not, so this session needs re-indexing once it goes idle. Surfacing it is what makes
-  // that recoverable — silently reporting "skipped" hides a real inconsistency between surfaces.
-  if (write.skipReason === 'stale-source') {
-    options.onWarn?.(
-      `transcript grew during synthesis; in-transcript record not updated: ${filePath}`,
-    );
-  }
-
+  const write = writeToTranscript(filePath, record, sourceHash, options);
   await writeToClaudeMem(record, options);
 
   return {
