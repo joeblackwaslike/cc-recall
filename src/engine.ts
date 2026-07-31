@@ -112,6 +112,15 @@ export const indexSession = async (
   if (options.baseDir) writeOptions.baseDir = options.baseDir;
   const write = writeRecordToTranscript(filePath, record, writeOptions);
 
+  // A stale-source skip is transient, not a no-op: the sidecar was updated but the transcript
+  // was not, so this session needs re-indexing once it goes idle. Surfacing it is what makes
+  // that recoverable — silently reporting "skipped" hides a real inconsistency between surfaces.
+  if (write.skipReason === 'stale-source') {
+    options.onWarn?.(
+      `transcript grew during synthesis; in-transcript record not updated: ${filePath}`,
+    );
+  }
+
   await upsertToClaudeMem(record, { onWarn: options.onWarn });
 
   return {

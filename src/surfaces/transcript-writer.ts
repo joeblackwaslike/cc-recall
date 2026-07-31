@@ -52,11 +52,14 @@ export interface WriteOptions {
   fromOriginalBackup?: boolean;
   /**
    * Source hash of the content the record was synthesized from. When it no longer matches the
-   * file, the write is skipped: the caller read the transcript, spent up to the LLM timeout
-   * synthesizing, and the session has appended since. Writing anyway would stamp the *current*
-   * hash onto a record describing older content, and the next run's idempotency check would
-   * then match and skip — leaving the in-transcript record permanently stale while the sidecar
-   * moved on. Callers that synthesize asynchronously must pass this.
+   * file, the write is skipped: the caller read the transcript, spent time building the record,
+   * and the session has appended since. Writing anyway would stamp the *current* hash onto a
+   * record describing older content, and the next run's idempotency check would then match and
+   * skip — leaving the in-transcript record permanently stale while the sidecar moved on.
+   *
+   * Any caller that reads the transcript before calling this should pass it, not only
+   * asynchronous ones — a long synchronous gap has the same effect. Omitting it disables the
+   * check entirely, which is why `indexSession` always supplies it.
    */
   expectedSourceHash?: string;
 }
@@ -67,6 +70,13 @@ export interface WriteResult {
   skipped: boolean;
   sourceHash: string;
   backupPath: string;
+  /**
+   * Why the write was skipped. `unchanged` is the ordinary idempotent no-op; `stale-source`
+   * means the record described content the transcript has since grown past, which is a
+   * transient condition worth surfacing — silently returning the same shape for both leaves
+   * the caller unable to distinguish "nothing to do" from "this session needs re-indexing".
+   */
+  skipReason?: 'unchanged' | 'stale-source';
 }
 
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
@@ -221,7 +231,7 @@ export const writeRecordToTranscript = (
   const sourceHash = sha256(kept.join('\n'));
 
   if (hadRecallRecord && markerHash === sourceHash) {
-    return { written: false, skipped: true, sourceHash, backupPath };
+    return { written: false, skipped: true, skipReason: 'unchanged', sourceHash, backupPath };
   }
 
   // Claude Code appends to live transcripts while we work. The dangerous window is not inside
@@ -229,7 +239,7 @@ export const writeRecordToTranscript = (
   // write. Re-reading here would only compare two reads microseconds apart and catch nothing;
   // the record's own provenance is what has to be checked.
   if (options.expectedSourceHash !== undefined && options.expectedSourceHash !== sourceHash) {
-    return { written: false, skipped: true, sourceHash, backupPath };
+    return { written: false, skipped: true, skipReason: 'stale-source', sourceHash, backupPath };
   }
 
   const origErrors = parseTranscriptText(original, filePath).parseErrors;

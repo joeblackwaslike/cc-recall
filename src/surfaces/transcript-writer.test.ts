@@ -147,6 +147,8 @@ describe('transcript-writer — content preservation', () => {
     });
     expect(result.written).toBe(false);
     expect(result.skipped).toBe(true);
+    // Distinguishable from an ordinary idempotent no-op, so the caller can act on it.
+    expect(result.skipReason).toBe('stale-source');
     expect(readFileSync(file, 'utf8')).toContain('appended during synthesis');
   });
 
