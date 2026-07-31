@@ -33,6 +33,14 @@ const AI_TITLE_TYPE = 'ai-title';
 const TMP_SUFFIX = '.cc-recall-tmp';
 const PREWRITE_SUFFIX = '.prewrite';
 
+/**
+ * Errno codes meaning "this filesystem or platform does not support directory fsync" — an
+ * expected absence of a durability nicety, not a degradation worth reporting. Kernels and
+ * Node versions disagree on which of these they surface for the same condition, so the whole
+ * family is treated as quiet; anything outside it means durability is silently degrading.
+ */
+const QUIET_FSYNC_CODES = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'ENOSYS']);
+
 export const defaultBaseDir = (): string => path.join(homedir(), '.claude', 'cc-recall');
 
 const isValidSessionId = (id: string): boolean => /^[a-zA-Z0-9_-]+$/.test(id);
@@ -228,10 +236,17 @@ const atomicWrite = (
     fsyncSync(dir);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (code !== 'EINVAL' && code !== 'ENOTSUP') {
-      onWarn?.(
-        `directory fsync failed (${code ?? 'unknown'}), write committed but not durable: ${filePath}`,
-      );
+    if (!QUIET_FSYNC_CODES.has(code ?? '')) {
+      // `onWarn` is caller-supplied and runs *after* renameSync committed. If it throws, it
+      // fails a write that already landed — the exact failure this block exists to prevent.
+      // Reporting a problem must never become one.
+      try {
+        onWarn?.(
+          `directory fsync failed (${code ?? 'unknown'}), write committed but not durable: ${filePath}`,
+        );
+      } catch {
+        /* a broken warn channel is not grounds to fail a committed write */
+      }
     }
   } finally {
     if (dir !== undefined) closeSync(dir);
