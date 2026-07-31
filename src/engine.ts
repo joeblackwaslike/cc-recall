@@ -19,7 +19,11 @@ import {
 } from './record/synthesizer.js';
 import { upsertToClaudeMem } from './surfaces/claude-mem.js';
 import type { Sidecar } from './surfaces/sidecar.js';
-import { computeSourceHash, writeRecordToTranscript } from './surfaces/transcript-writer.js';
+import {
+  type WriteOptions,
+  computeSourceHash,
+  writeRecordToTranscript,
+} from './surfaces/transcript-writer.js';
 import { parseTranscriptText } from './transcript/parse.js';
 
 export const defaultProjectsRoot = (): string => path.join(homedir(), '.claude', 'projects');
@@ -102,11 +106,11 @@ export const indexSession = async (
   }
 
   sidecar.upsert(record, sourceHash);
-  const write = writeRecordToTranscript(
-    filePath,
-    record,
-    options.baseDir ? { baseDir: options.baseDir } : {},
-  );
+  // Pass the hash of the content the record was actually synthesized from, so the writer can
+  // refuse to stamp it onto a transcript the session has grown past during synthesis.
+  const writeOptions: WriteOptions = { expectedSourceHash: sourceHash };
+  if (options.baseDir) writeOptions.baseDir = options.baseDir;
+  const write = writeRecordToTranscript(filePath, record, writeOptions);
 
   await upsertToClaudeMem(record, { onWarn: options.onWarn });
 

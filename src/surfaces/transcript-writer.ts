@@ -50,6 +50,15 @@ export interface WriteOptions {
    * from the current file. Lossy for any session that has grown since it was first indexed.
    */
   fromOriginalBackup?: boolean;
+  /**
+   * Source hash of the content the record was synthesized from. When it no longer matches the
+   * file, the write is skipped: the caller read the transcript, spent up to the LLM timeout
+   * synthesizing, and the session has appended since. Writing anyway would stamp the *current*
+   * hash onto a record describing older content, and the next run's idempotency check would
+   * then match and skip — leaving the in-transcript record permanently stale while the sidecar
+   * moved on. Callers that synthesize asynchronously must pass this.
+   */
+  expectedSourceHash?: string;
 }
 
 export interface WriteResult {
@@ -206,18 +215,16 @@ export const writeRecordToTranscript = (
     return { written: false, skipped: true, sourceHash, backupPath };
   }
 
-  const origErrors = parseTranscriptText(original, filePath).parseErrors;
-  ensureOriginalBackup(filePath, backupPath);
-
-  // Claude Code appends to live transcripts, and synthesis can sit between the read above and
-  // this point for as long as the LLM timeout allows. Anything appended in that window would
-  // be silently discarded, since `kept` was derived from the earlier read. Re-read and bail if
-  // the file moved; the caller can retry once the session is idle.
-  const current = readFileSync(filePath, 'utf8');
-  if (current !== original) {
+  // Claude Code appends to live transcripts while we work. The dangerous window is not inside
+  // this function — it spans the caller's read, synthesis (up to the LLM timeout), and this
+  // write. Re-reading here would only compare two reads microseconds apart and catch nothing;
+  // the record's own provenance is what has to be checked.
+  if (options.expectedSourceHash !== undefined && options.expectedSourceHash !== sourceHash) {
     return { written: false, skipped: true, sourceHash, backupPath };
   }
 
+  const origErrors = parseTranscriptText(original, filePath).parseErrors;
+  ensureOriginalBackup(filePath, backupPath);
   const snapshot = takePreWriteSnapshot(filePath, backupPath);
   atomicWrite(filePath, buildContent(kept, record, sourceHash));
 

@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RECALL_RECORD_TYPE, type RecallRecord } from '../record/schema.js';
 import { synthesizeHeuristic } from '../record/synthesizer.js';
 import { parseTranscriptText } from '../transcript/parse.js';
-import { didRevertTranscript, writeRecordToTranscript } from './transcript-writer.js';
+import {
+  computeSourceHash,
+  didRevertTranscript,
+  writeRecordToTranscript,
+} from './transcript-writer.js';
 
 const SESSION = 's-w';
 const FIRST_PROMPT = 'do the thing';
@@ -38,7 +42,8 @@ const laterTurn = (text: string): string =>
     message: { role: 'user', content: [{ type: 'text', text }] },
   });
 
-describe('transcript-writer', () => {
+/** Fresh temp dir + a transcript containing only native (non-cc-recall) lines. */
+const useTranscript = (): { get: () => { dir: string; file: string } } => {
   let dir: string;
   let file: string;
   beforeEach(() => {
@@ -48,6 +53,16 @@ describe('transcript-writer', () => {
   });
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
+  });
+  return { get: () => ({ dir, file }) };
+};
+
+describe('transcript-writer', () => {
+  const ctx = useTranscript();
+  let dir: string;
+  let file: string;
+  beforeEach(() => {
+    ({ dir, file } = ctx.get());
   });
 
   it('injects a recall-record and overrides the title, non-destructively', () => {
@@ -83,40 +98,74 @@ describe('transcript-writer', () => {
   // The pre-fix implementation restored a snapshot taken the FIRST time cc-recall touched the
   // file, so reverting a session that had since been resumed silently discarded everything
   // added in between. These pin the two paths where that could happen.
-  describe('does not lose content added after the first index', () => {
-    it('revert preserves turns appended since indexing', () => {
-      writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
+});
 
-      // Session is resumed and grows well past what the original backup captured.
-      const grown = `${readFileSync(file, 'utf8').trimEnd()}\n${laterTurn('much later work')}\n`;
-      writeFileSync(file, grown);
+describe('transcript-writer — content preservation', () => {
+  const ctx = useTranscript();
+  let dir: string;
+  let file: string;
+  beforeEach(() => {
+    ({ dir, file } = ctx.get());
+  });
+  it('revert preserves turns appended since indexing', () => {
+    writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
 
-      expect(didRevertTranscript(file, SESSION, { baseDir: dir })).toBe(true);
+    // Session is resumed and grows well past what the original backup captured.
+    const grown = `${readFileSync(file, 'utf8').trimEnd()}\n${laterTurn('much later work')}\n`;
+    writeFileSync(file, grown);
 
-      const after = readFileSync(file, 'utf8');
-      expect(after).toContain('much later work');
-      expect(after).toContain(FIRST_PROMPT);
-      const reparsed = parseTranscriptText(after, file);
-      expect(reparsed.records.some((r) => r.type === RECALL_RECORD_TYPE)).toBe(false);
+    expect(didRevertTranscript(file, SESSION, { baseDir: dir })).toBe(true);
+
+    const after = readFileSync(file, 'utf8');
+    expect(after).toContain('much later work');
+    expect(after).toContain(FIRST_PROMPT);
+    const reparsed = parseTranscriptText(after, file);
+    expect(reparsed.records.some((r) => r.type === RECALL_RECORD_TYPE)).toBe(false);
+  });
+
+  it('refuses to strip a record belonging to a different session', () => {
+    writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
+    expect(didRevertTranscript(file, 'some-other-session', { baseDir: dir })).toBe(false);
+    const after = parseTranscriptText(readFileSync(file, 'utf8'), file);
+    expect(after.records.some((r) => r.type === RECALL_RECORD_TYPE)).toBe(true);
+  });
+
+  // The window that matters spans the CALLER's read, synthesis, and this write — not two
+  // reads inside the writer. A record synthesized from older content must not be stamped
+  // with the current hash, or the next run's idempotency check matches and skips forever,
+  // leaving the in-transcript record permanently stale while the sidecar moves on.
+  it('refuses to write a record synthesized from content the file has grown past', () => {
+    const before = writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
+    const staleHash = before.sourceHash;
+
+    const grown = `${readFileSync(file, 'utf8').trimEnd()}\n${laterTurn('appended during synthesis')}\n`;
+    writeFileSync(file, grown);
+
+    const result = writeRecordToTranscript(file, makeRecord(), {
+      baseDir: dir,
+      expectedSourceHash: staleHash,
     });
+    expect(result.written).toBe(false);
+    expect(result.skipped).toBe(true);
+    expect(readFileSync(file, 'utf8')).toContain('appended during synthesis');
+  });
 
-    it('refuses to strip a record belonging to a different session', () => {
-      writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
-      expect(didRevertTranscript(file, 'some-other-session', { baseDir: dir })).toBe(false);
-      const after = parseTranscriptText(readFileSync(file, 'utf8'), file);
-      expect(after.records.some((r) => r.type === RECALL_RECORD_TYPE)).toBe(true);
-    });
+  it('writes when the expected hash still matches the grown file', () => {
+    writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
 
-    it('skips the write when the transcript changed between read and write', () => {
-      // First write establishes the record; then the file grows the way a live session does.
-      writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
-      const grown = `${readFileSync(file, 'utf8').trimEnd()}\n${laterTurn('appended mid-run')}\n`;
-      writeFileSync(file, grown);
+    // Source genuinely changed, so idempotency won't short-circuit — and this time the
+    // caller synthesized from the grown content, so its hash matches and the write proceeds.
+    const grown = `${readFileSync(file, 'utf8').trimEnd()}\n${laterTurn('newer turn')}\n`;
+    writeFileSync(file, grown);
+    const fresh = computeSourceHash(grown);
 
-      // A subsequent write must not rebuild the file from stale content.
-      writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
-      expect(readFileSync(file, 'utf8')).toContain('appended mid-run');
-    });
+    const result = writeRecordToTranscript(
+      file,
+      { ...makeRecord(), title: 'second pass' },
+      { baseDir: dir, expectedSourceHash: fresh },
+    );
+    expect(result.written).toBe(true);
+    expect(readFileSync(file, 'utf8')).toContain('newer turn');
   });
 
   it('opting into the original backup is still available and explicit', () => {
