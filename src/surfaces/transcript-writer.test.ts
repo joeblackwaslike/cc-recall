@@ -115,12 +115,18 @@ describe('transcript-writer — snapshot hygiene', () => {
 
   // The more dangerous path: a snapshot taken and then abandoned accumulates beside the
   // backups it shadows, which is exactly what the `finally` exists to prevent.
-  it('a failed write leaves no .prewrite snapshot behind', () => {
+  it('a failed write leaves no .prewrite snapshot behind, and rolls the content back', () => {
     const { dir, file } = ctx.get();
+    const before = readFileSync(file, 'utf8');
+
     expect(() =>
       writeRecordToTranscript(file, makeRecord(), { baseDir: dir, verifyIntegrity: () => false }),
     ).toThrow(/integrity check failed/);
+
+    // Cleanup and rollback are separate guarantees; asserting only the former would pass even
+    // if the restore silently wrote the wrong content.
     expect(snapshotsIn(dir)).toEqual([]);
+    expect(readFileSync(file, 'utf8')).toBe(before);
   });
 });
 
