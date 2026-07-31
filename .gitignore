@@ -18,3 +18,6 @@ docs/api/
 docs/backlog.md
 docs/handoff.md
 node_modules/
+
+# Local agent tooling state — session ids and absolute home paths
+.clawhip/

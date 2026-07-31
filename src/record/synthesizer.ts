@@ -77,6 +77,10 @@ export const INDEXER_CWD = path.join(homedir(), '.claude', 'cc-recall', 'indexer
  * a genuine user session opening with the same phrasing would be misclassified and silently
  * skipped; carrying through "was DONE, ASKED, and QUESTIONED." makes a collision implausible.
  * Verified against the enrichment transcripts already on disk, which begin with exactly this.
+ *
+ * Because the sentinel now contains a literal newline, `isIndexerTranscript` normalizes CRLF
+ * before comparing — a transcript stored with `\r\n` would otherwise fail `startsWith` and be
+ * re-indexed as if it were a real session, silently reopening the self-indexing loop.
  */
 const INDEXER_PROMPT_SIGNATURE =
   'You are indexing a Claude Code session transcript so it can be found later by what\nwas DONE, ASKED, and QUESTIONED.';
@@ -88,7 +92,8 @@ const INDEXER_PROMPT_SIGNATURE =
  * here, so anything we cannot positively identify passes through to normal indexing.
  */
 export const isIndexerTranscript = (firstUserPrompt: string | undefined): boolean =>
-  firstUserPrompt?.trimStart().startsWith(INDEXER_PROMPT_SIGNATURE) ?? false;
+  firstUserPrompt?.replaceAll('\r\n', '\n').trimStart().startsWith(INDEXER_PROMPT_SIGNATURE) ??
+  false;
 
 /** Tools whose invocation means a file was created or modified. */
 const EDIT_TOOLS = new Set([

@@ -5,7 +5,7 @@
 // doctor. All heavy lifting lives in src/ so the same logic is reachable from hooks and
 // future platform adapters. `doctor` is the G0 acceptance test (spec §12).
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
@@ -108,6 +108,16 @@ const backfillOptionsFrom = (cli: BackfillCliOptions): BackfillOptions => {
 };
 
 const runIndex = async (file: string, cli: IndexCliOptions): Promise<void> => {
+  // The SessionEnd hook passes a transcript_path that may have been moved by `migrate` or
+  // deleted since the session ended. Without this guard the ENOENT from readFileSync becomes
+  // an unhandled rejection that aborts the process, killing the indexer run silently because
+  // the hook has already detached. This was the single largest source of crash-loops in
+  // session-end.log. The guard is advisory — the file can still vanish before the read, which
+  // the top-level catch handles.
+  if (!existsSync(file)) {
+    err(`skip: transcript no longer exists: ${file}`);
+    return;
+  }
   const sidecar = openSidecar(cli.db);
   try {
     const result = await indexSession(file, sidecar, indexOptionsFrom(cli));
@@ -164,8 +174,25 @@ const runSearch = (query: string, options: SearchCliOptions): void => {
 
 const runRevert = (file: string, options: { baseDir: string }): void => {
   const parsed = parseTranscriptText(readFileSync(file, 'utf8'), file);
-  const isReverted = didRevertTranscript(file, parsed.sessionId, { baseDir: options.baseDir });
-  out(isReverted ? `reverted ${parsed.sessionId}` : `no backup for ${parsed.sessionId}`);
+  // A `false` return covers two unrelated outcomes: nothing of ours to strip, or a live session
+  // appended mid-revert and the strip was abandoned to avoid rebuilding from a stale read. Only
+  // the second is worth retrying, and without `onWarn` the CLI reported both as "no backup" —
+  // telling a user to stop when the correct advice was to run it again once the session is idle.
+  const warnings: string[] = [];
+  const isReverted = didRevertTranscript(file, parsed.sessionId, {
+    baseDir: options.baseDir,
+    onWarn: (message) => {
+      warnings.push(message);
+      err(message);
+    },
+  });
+  if (isReverted) {
+    out(`reverted ${parsed.sessionId}`);
+    return;
+  }
+  out(
+    warnings.length > 0 ? `not reverted ${parsed.sessionId}` : `no backup for ${parsed.sessionId}`,
+  );
 };
 
 const reportSidecar = (db: string): void => {
@@ -313,4 +340,11 @@ program
     }
   });
 
-await program.parseAsync(process.argv);
+// A rejection here would otherwise surface as a raw V8 stack dump and a non-zero exit with no
+// actionable message — the failure mode that made the ENOENT crashes so hard to attribute.
+try {
+  await program.parseAsync(process.argv);
+} catch (error) {
+  err(`cc-recall: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
+}
