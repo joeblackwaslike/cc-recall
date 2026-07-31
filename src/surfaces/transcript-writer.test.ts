@@ -42,7 +42,13 @@ const laterTurn = (text: string): string =>
     message: { role: 'user', content: [{ type: 'text', text }] },
   });
 
-/** Fresh temp dir + a transcript containing only native (non-cc-recall) lines. */
+/**
+ * Fresh temp dir + a transcript containing only native (non-cc-recall) lines.
+ *
+ * Registers its own `beforeEach`/`afterEach` at call time, so call it exactly once per
+ * `describe` — a second call in the same block would register a second pair against the same
+ * closure and the later setup would win, silently leaking the first temp dir.
+ */
 const useTranscript = (): { get: () => { dir: string; file: string } } => {
   let dir: string;
   let file: string;
@@ -100,9 +106,9 @@ describe('transcript-writer', () => {
   // added in between. These pin the two paths where that could happen.
 });
 
-/** Abandoned pre-write snapshots accumulate beside the backups they shadow. */
+/** Abandoned pre-write snapshots accumulate beside the transcript they protect. */
 const snapshotsIn = (dir: string): string[] =>
-  readdirSync(path.join(dir, 'backups')).filter((f) => f.endsWith('.prewrite'));
+  readdirSync(dir).filter((f) => f.endsWith('.prewrite'));
 
 describe('transcript-writer — snapshot hygiene', () => {
   const ctx = useTranscript();
@@ -114,7 +120,7 @@ describe('transcript-writer — snapshot hygiene', () => {
   });
 
   // The more dangerous path: a snapshot taken and then abandoned accumulates beside the
-  // backups it shadows, which is exactly what the `finally` exists to prevent.
+  // transcript it protects, which is exactly what the `finally` exists to prevent.
   it('a failed write leaves no .prewrite snapshot behind, and rolls the content back', () => {
     const { dir, file } = ctx.get();
     const before = readFileSync(file, 'utf8');
@@ -160,10 +166,11 @@ describe('transcript-writer — content preservation', () => {
     expect(after.records.some((r) => r.type === RECALL_RECORD_TYPE)).toBe(true);
   });
 
-  // The window that matters spans the CALLER's read, synthesis, and this write — not two
-  // reads inside the writer. A record synthesized from older content must not be stamped
-  // with the current hash, or the next run's idempotency check matches and skips forever,
-  // leaving the in-transcript record permanently stale while the sidecar moves on.
+  // The window that matters spans the CALLER's read, synthesis, and this write. The writer does
+  // read the file — once, to compute the source hash — but deliberately does not re-read to
+  // compare, because two reads microseconds apart would catch nothing. A record synthesized from
+  // older content must not be stamped with the current hash, or the next run's idempotency check
+  // matches and skips forever, leaving the in-transcript record stale while the sidecar moves on.
   it('refuses to write a record synthesized from content the file has grown past', () => {
     const before = writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
     const staleHash = before.sourceHash;

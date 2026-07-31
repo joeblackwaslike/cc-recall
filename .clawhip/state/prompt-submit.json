@@ -1,0 +1,8 @@
+{
+  "observed_at": "2026-07-31T04:25:59.607Z",
+  "provider": "claude-code",
+  "event_name": "UserPromptSubmit",
+  "session_id": "5e71b0f6-8436-45c6-bd0f-f1a38ac43cbb",
+  "turn_id": null,
+  "prompt_summary": "You are a background memory extractor running after a Claude Code session. Read the session transcript at: /Users/joe/.claude/projects/-Users-joe/f59f25c8-1d06-413d-aa24-9de07e40566f.jsonl (it is a JS…"
+}

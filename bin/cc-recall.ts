@@ -174,8 +174,25 @@ const runSearch = (query: string, options: SearchCliOptions): void => {
 
 const runRevert = (file: string, options: { baseDir: string }): void => {
   const parsed = parseTranscriptText(readFileSync(file, 'utf8'), file);
-  const isReverted = didRevertTranscript(file, parsed.sessionId, { baseDir: options.baseDir });
-  out(isReverted ? `reverted ${parsed.sessionId}` : `no backup for ${parsed.sessionId}`);
+  // A `false` return covers two unrelated outcomes: nothing of ours to strip, or a live session
+  // appended mid-revert and the strip was abandoned to avoid rebuilding from a stale read. Only
+  // the second is worth retrying, and without `onWarn` the CLI reported both as "no backup" —
+  // telling a user to stop when the correct advice was to run it again once the session is idle.
+  const warnings: string[] = [];
+  const isReverted = didRevertTranscript(file, parsed.sessionId, {
+    baseDir: options.baseDir,
+    onWarn: (message) => {
+      warnings.push(message);
+      err(message);
+    },
+  });
+  if (isReverted) {
+    out(`reverted ${parsed.sessionId}`);
+    return;
+  }
+  out(
+    warnings.length > 0 ? `not reverted ${parsed.sessionId}` : `no backup for ${parsed.sessionId}`,
+  );
 };
 
 const reportSidecar = (db: string): void => {
