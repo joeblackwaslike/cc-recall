@@ -243,19 +243,22 @@ const discardSnapshot = (snapshot: string, onWarn?: (message: string) => void): 
 };
 
 /**
- * Remove a temp file whose staging failed.
+ * Remove a staging file whose write failed.
  *
- * The write already failed, so this cannot fail it further — but a temp file that survives for a
- * *permissions* reason sits in the way of the next attempt's rename, and that failure surfaces
- * with a confusing message unless the real cause was recorded here.
+ * The write already failed, so this cannot fail it further. It is still worth reporting: a
+ * staging file that survives for a *permissions* reason means the next attempt will fail the
+ * same way at `openSync`, and without this the operator sees only the second failure with no
+ * indication that the first one left anything behind. (It does not block the next `renameSync` —
+ * POSIX rename replaces the destination atomically, and the next write truncates the staging
+ * path anyway. The signal is the permissions problem, not the file.)
  */
-const discardStagingFile = (tmp: string): void => {
+const discardStagingFile = (tmp: string, onWarn?: (message: string) => void): void => {
   try {
     unlinkSync(tmp);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
-      writeStderr(`failed to remove partial temp file (${code ?? 'unknown'}): ${tmp}`);
+      reportWarning(onWarn, `failed to remove partial staging file (${code ?? 'unknown'}): ${tmp}`);
     }
   }
 };
@@ -337,7 +340,7 @@ const atomicWrite = (
     didStage = true;
   } finally {
     closeSync(fd);
-    if (!didStage) discardStagingFile(tmp);
+    if (!didStage) discardStagingFile(tmp, onWarn);
   }
   renameSync(tmp, filePath);
   fsyncParentDirectory(filePath, onWarn);
@@ -481,9 +484,12 @@ export const didRevertTranscript = (
     try {
       copyFileSync(snapshot, filePath);
     } catch (restoreError) {
+      // Both paths are named because this warning may be the only artifact that survives: the
+      // snapshot is discarded in `finally` either way, and if the throw below is caught higher
+      // up, this line is all the operator gets.
       reportWarning(
         options.onWarn,
-        `restore after failed strip also failed, transcript may be partially written: ${filePath} (${String(restoreError)})`,
+        `restore after failed strip also failed, transcript may be partially written: ${filePath} (snapshot: ${snapshot}; write failed with: ${String(error)}; restore failed with: ${String(restoreError)})`,
       );
     }
     throw error;

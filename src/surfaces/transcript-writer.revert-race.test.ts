@@ -16,8 +16,11 @@ import { didRevertTranscript, writeRecordToTranscript } from './transcript-write
 
 // Arm this only AFTER per-test setup has finished: `beforeEach` calls writeRecordToTranscript,
 // which reads the file itself, so a hook armed earlier would fire on the wrong read. It is
-// one-shot (cleared as it fires) and reset in afterEach, so the ordering is safe as written —
-// but it is an ordering dependency, and reordering setup would break it silently.
+// one-shot (cleared as it fires) and reset in afterEach, so the ordering is safe as written.
+//
+// The symptom if that ordering is ever broken is the dangerous kind: the hook fires during
+// setup, the transcript is never mutated between the revert's two reads, the guard never trips
+// — and the test still passes, having exercised nothing. A vacuous pass, not a failure.
 const fsHook = vi.hoisted(() => ({ afterNextRead: null as null | (() => void) }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -106,7 +109,8 @@ describe('transcript-writer — revert concurrent-modification guard', () => {
 
     // Bailing out must not leave a snapshot behind. The guard returns before any snapshot is
     // taken, and this pins that ordering — moving `takePreWriteSnapshot` above the guard would
-    // leak a .prewrite on every concurrent-modification bail, silently and forever.
+    // leak a .prewrite on every concurrent-modification bail, silently, until some later
+    // successful write happened to reuse and discard the same path.
     expect(readdirSync(dir).filter((f) => f.endsWith('.prewrite'))).toEqual([]);
   });
 
