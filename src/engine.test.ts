@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { backfill, coverage, indexSession } from './engine.js';
+import { RECALL_RECORD_TYPE } from './record/schema.js';
 import { type Sidecar, openSidecar } from './surfaces/sidecar.js';
 
 const PROJECT_DIR = '-Users-joe-proj';
@@ -100,7 +101,10 @@ describe('engine', () => {
 
     expect(warnings.some((w) => w.includes('grew during synthesis'))).toBe(true);
     // The appended turn survives — the write was declined, not applied over stale content.
-    expect(readFileSync(file, 'utf8')).toContain('appended mid-synthesis');
+    const after = readFileSync(file, 'utf8');
+    expect(after).toContain('appended mid-synthesis');
+    // And the write really was declined: no cc-recall record was injected.
+    expect(after).not.toContain(RECALL_RECORD_TYPE);
   });
 
   it('backfill is idempotent across runs', async () => {

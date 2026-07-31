@@ -100,14 +100,27 @@ describe('transcript-writer', () => {
   // added in between. These pin the two paths where that could happen.
 });
 
+/** Abandoned pre-write snapshots accumulate beside the backups they shadow. */
+const snapshotsIn = (dir: string): string[] =>
+  readdirSync(path.join(dir, 'backups')).filter((f) => f.endsWith('.prewrite'));
+
 describe('transcript-writer — snapshot hygiene', () => {
   const ctx = useTranscript();
 
   it('a successful write leaves no .prewrite snapshot behind', () => {
     const { dir, file } = ctx.get();
     writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
-    const leftovers = readdirSync(path.join(dir, 'backups')).filter((f) => f.endsWith('.prewrite'));
-    expect(leftovers).toEqual([]);
+    expect(snapshotsIn(dir)).toEqual([]);
+  });
+
+  // The more dangerous path: a snapshot taken and then abandoned accumulates beside the
+  // backups it shadows, which is exactly what the `finally` exists to prevent.
+  it('a failed write leaves no .prewrite snapshot behind', () => {
+    const { dir, file } = ctx.get();
+    expect(() =>
+      writeRecordToTranscript(file, makeRecord(), { baseDir: dir, verifyIntegrity: () => false }),
+    ).toThrow(/integrity check failed/);
+    expect(snapshotsIn(dir)).toEqual([]);
   });
 });
 

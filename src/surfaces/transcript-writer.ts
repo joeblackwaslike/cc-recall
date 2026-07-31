@@ -207,13 +207,20 @@ const atomicWrite = (filePath: string, content: string): void => {
   // has already succeeded. It is also not portable: fsync on a directory fd raises EINVAL on
   // some Linux filesystems and is unsupported on Windows. Letting it throw would fail a write
   // that actually landed, and send the caller down the restore path over good content.
-  const dir = openSync(path.dirname(filePath), 'r');
+  // `renameSync` above is the commit point: the new content is durable-enough and visible at
+  // the real path. Everything after it is a durability nicety, so *nothing* here may fail the
+  // operation — a throw would send the caller into the restore path over content that is fine.
+  // That applies to `openSync` as much as `fsyncSync`: a missing or unreadable directory is a
+  // reason to skip the fsync, not to undo a committed write. `dir` is only closed when it was
+  // actually opened, so a failed open cannot leak or double-close.
+  let dir: number | undefined;
   try {
+    dir = openSync(path.dirname(filePath), 'r');
     fsyncSync(dir);
   } catch {
-    /* EINVAL on some Linux filesystems, unsupported on Windows; the rename already committed */
+    /* EINVAL on some Linux filesystems, unsupported on Windows, EACCES on the directory */
   } finally {
-    closeSync(dir);
+    if (dir !== undefined) closeSync(dir);
   }
 };
 
