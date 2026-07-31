@@ -69,16 +69,26 @@ const indexerModel = (): string => {
 export const INDEXER_CWD = path.join(homedir(), '.claude', 'cc-recall', 'indexer');
 
 /**
- * Opening line of the enrichment prompt, used both to build it and to recognize an
- * indexer run when re-encountering one. Kept as a constant so the two cannot drift:
- * detection must keep matching transcripts written before the dedicated cwd existed.
+ * Opening of the enrichment prompt, used both to build it and to recognize an indexer run
+ * when re-encountering one. Kept as a constant so the two cannot drift: detection must keep
+ * matching transcripts written before the dedicated cwd existed.
+ *
+ * Spans two lines deliberately. A one-line sentinel ending at "…by what" is short enough that
+ * a genuine user session opening with the same phrasing would be misclassified and silently
+ * skipped; carrying through "was DONE, ASKED, and QUESTIONED." makes a collision implausible.
+ * Verified against the enrichment transcripts already on disk, which begin with exactly this.
  */
-const INDEXER_PROMPT_FIRST_LINE =
-  'You are indexing a Claude Code session transcript so it can be found later by what';
+const INDEXER_PROMPT_SIGNATURE =
+  'You are indexing a Claude Code session transcript so it can be found later by what\nwas DONE, ASKED, and QUESTIONED.';
 
-/** Whether a transcript's opening prompt marks it as one of our own enrichment runs. */
+/**
+ * Whether a transcript's opening prompt marks it as one of our own enrichment runs.
+ *
+ * A blank or absent prompt is treated as a real session — skipping is the destructive choice
+ * here, so anything we cannot positively identify passes through to normal indexing.
+ */
 export const isIndexerTranscript = (firstUserPrompt: string | undefined): boolean =>
-  firstUserPrompt?.trimStart().startsWith(INDEXER_PROMPT_FIRST_LINE) ?? false;
+  firstUserPrompt?.trimStart().startsWith(INDEXER_PROMPT_SIGNATURE) ?? false;
 
 /** Tools whose invocation means a file was created or modified. */
 const EDIT_TOOLS = new Set([
@@ -265,8 +275,7 @@ const buildDigest = (parsed: ParsedTranscript): string => {
 
 const buildLlmPrompt = (parsed: ParsedTranscript): string =>
   [
-    INDEXER_PROMPT_FIRST_LINE,
-    'was DONE, ASKED, and QUESTIONED. Read the digest and reply with ONLY a JSON object',
+    `${INDEXER_PROMPT_SIGNATURE} Read the digest and reply with ONLY a JSON object`,
     '(no prose, no code fences) of this exact shape:',
     '{"title":"<=80 chars, what was actually done (not how it started)",',
     '"summary":"2-4 sentences","asks_implemented":["user requests that became real changes"],',

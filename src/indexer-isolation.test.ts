@@ -72,9 +72,10 @@ vi.mock('node:child_process', () => ({
   },
 }));
 
-const { INDEXER_CWD, isIndexerTranscript, runClaudeHeadless } = await import(
+const { INDEXER_CWD, isIndexerTranscript, runClaudeHeadless, synthesize } = await import(
   './record/synthesizer.js'
 );
+const { parseTranscriptText } = await import('./transcript/parse.js');
 const { INDEXER_PROJECT_DIR, backfill, indexSession, listTranscripts } = await import(
   './engine.js'
 );
@@ -152,6 +153,16 @@ describe('enrichment subprocess invocation', () => {
   it('still delivers the prompt over stdin', async () => {
     await runClaudeHeadless('summarise this');
     expect(stdinWrites).toEqual(['summarise this']);
+  });
+
+  // Closes the loop between generation and detection. Without this, editing the prompt text
+  // would keep generating enrichment runs that the detector no longer recognises — the corpus
+  // would quietly start re-indexing its own output again, which is the original defect.
+  it('generates a prompt its own detector recognises (round-trip)', async () => {
+    const parsed = parseTranscriptText(transcriptOf('rt', 'do a thing'), '/repo/rt.jsonl');
+    await synthesize({ parsed, project: 'proj', provenance: 'backfill' });
+    expect(stdinWrites).toHaveLength(1);
+    expect(isIndexerTranscript(stdinWrites[0])).toBe(true);
   });
 });
 
@@ -240,5 +251,10 @@ describe('corpus exclusion and convergence', () => {
     const second = await backfill(sidecar, { projectsRoot: root, baseDir, llm: false });
     expect(second.written).toBe(0); // nothing new was real work
     expect(listTranscripts(root)).toHaveLength(before + 1); // and the queue did not grow again
+
+    // `written === 0` alone would also hold if backfill had *errored* on the stray transcript.
+    // Assert it was actively skipped and nothing failed, so the test stays diagnostic.
+    expect(second.failed).toBe(0);
+    expect(second.skipped).toBe(2); // the pre-existing real session, plus the stray enrichment run
   });
 });

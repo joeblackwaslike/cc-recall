@@ -27,7 +27,16 @@ export const defaultProjectsRoot = (): string => path.join(homedir(), '.claude',
 /** The encoded-cwd project dir name a transcript lives under. */
 export const projectFromPath = (filePath: string): string => path.basename(path.dirname(filePath));
 
-/** Claude Code encodes a cwd into a project dir name by replacing `/` and `.` with `-`. */
+/**
+ * Claude Code encodes a cwd into a project dir name by replacing `/` and `.` with `-`.
+ *
+ * Derived empirically from live project dirs rather than from documentation, e.g.
+ * `/Users/joe/.claude/projects/-Users-joe` → `-Users-joe--claude-projects--Users-joe`
+ * (note the doubled `-` where `/.` collapses). If Claude Code ever changes this encoding the
+ * skip below fails *silently* — enrichment transcripts resume being enumerated — so the
+ * accompanying test writes a transcript under the encoded name and asserts it is excluded.
+ * Re-verify against `~/.claude/projects/` if that test ever starts passing vacuously.
+ */
 const encodeProjectDir = (cwd: string): string => cwd.replaceAll(/[/.]/g, '-');
 
 /** Project dir holding the enrichment subprocesses' own transcripts; never indexed. */
