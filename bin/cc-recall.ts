@@ -5,7 +5,7 @@
 // doctor. All heavy lifting lives in src/ so the same logic is reachable from hooks and
 // future platform adapters. `doctor` is the G0 acceptance test (spec §12).
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { Command } from 'commander';
@@ -108,6 +108,14 @@ const backfillOptionsFrom = (cli: BackfillCliOptions): BackfillOptions => {
 };
 
 const runIndex = async (file: string, cli: IndexCliOptions): Promise<void> => {
+  // The SessionEnd hook passes a transcript_path that may have been moved by `migrate` or
+  // deleted since the session ended. Without this guard the ENOENT from readFileSync becomes
+  // an unhandled rejection that aborts the process — 13,052 such crashes accumulated in the
+  // log, each killing one indexer run silently because the hook had already detached.
+  if (!existsSync(file)) {
+    err(`skip: transcript no longer exists: ${file}`);
+    return;
+  }
   const sidecar = openSidecar(cli.db);
   try {
     const result = await indexSession(file, sidecar, indexOptionsFrom(cli));
@@ -313,4 +321,11 @@ program
     }
   });
 
-await program.parseAsync(process.argv);
+// A rejection here would otherwise surface as a raw V8 stack dump and a non-zero exit with no
+// actionable message — the failure mode that made the ENOENT crashes so hard to attribute.
+try {
+  await program.parseAsync(process.argv);
+} catch (error) {
+  err(`cc-recall: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
+}
