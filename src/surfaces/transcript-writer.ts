@@ -62,6 +62,12 @@ export interface WriteOptions {
    * check entirely, which is why `indexSession` always supplies it.
    */
   expectedSourceHash?: string;
+  /**
+   * Called when an operation declines to act for a reason the caller would otherwise be unable
+   * to distinguish from an ordinary no-op — currently the revert path bailing on a concurrent
+   * modification, which returns the same `false` as "no record found".
+   */
+  onWarn?: (message: string) => void;
 }
 
 export interface WriteResult {
@@ -194,15 +200,13 @@ const atomicWrite = (filePath: string, content: string): void => {
   // has already succeeded. It is also not portable: fsync on a directory fd raises EINVAL on
   // some Linux filesystems and is unsupported on Windows. Letting it throw would fail a write
   // that actually landed, and send the caller down the restore path over good content.
+  const dir = openSync(path.dirname(filePath), 'r');
   try {
-    const dir = openSync(path.dirname(filePath), 'r');
-    try {
-      fsyncSync(dir);
-    } finally {
-      closeSync(dir);
-    }
+    fsyncSync(dir);
   } catch {
-    /* durability best-effort; the rename is already committed */
+    /* EINVAL on some Linux filesystems, unsupported on Windows; the rename already committed */
+  } finally {
+    closeSync(dir);
   }
 };
 
@@ -309,7 +313,14 @@ export const didRevertTranscript = (
   // Same race as the write path: a live session can append between this read and the write,
   // and `kept` was derived from the earlier content. Re-read and bail rather than rebuilding
   // the file from a stale view — the caller can revert again once the session is idle.
-  if (readFileSync(filePath, 'utf8') !== current) return false;
+  //
+  // This returns the same `false` as "no record for this session", which are very different
+  // outcomes: one means nothing to do, the other means try again shortly. `onWarn` is what
+  // separates them, so a caller is not left guessing which it hit.
+  if (readFileSync(filePath, 'utf8') !== current) {
+    options.onWarn?.(`transcript changed while reverting; left untouched: ${filePath}`);
+    return false;
+  }
 
   atomicWrite(filePath, kept.length === 0 ? '' : `${kept.join('\n')}\n`);
   return true;
