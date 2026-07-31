@@ -352,6 +352,16 @@ export interface SynthesizeOptions {
   llm?: LlmRunner | false;
   /** Called with a message when the LLM pass fails and the heuristic is used instead. */
   onWarn?: (message: string) => void;
+  /**
+   * Called with the outcome of the LLM pass, when one was attempted.
+   *
+   * Falling back to the heuristic is deliberately not an error — one degraded record is better
+   * than a failed run. But the caller cannot see the difference from the returned record, and a
+   * batch caller must: a failing call returns in milliseconds where a successful one takes ~15s,
+   * so a rate-limit storm makes a backfill finish *faster* while producing a fully degraded
+   * index, and report complete success while doing it.
+   */
+  onLlmOutcome?: (outcome: { ok: boolean; error?: string }) => void;
 }
 
 /** Synthesize a record: heuristic baseline enriched by the LLM, with graceful fallback. */
@@ -365,10 +375,12 @@ export const synthesize = async (
   try {
     const raw = await runner(buildLlmPrompt(input.parsed));
     const enrichment = llmEnrichmentSchema.parse(extractJson(raw));
+    options.onLlmOutcome?.({ ok: true });
     return applyEnrichment(base, enrichment);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     options.onWarn?.(`LLM synthesis failed, using heuristic: ${message}`);
+    options.onLlmOutcome?.({ ok: false, error: message });
     return base;
   }
 };

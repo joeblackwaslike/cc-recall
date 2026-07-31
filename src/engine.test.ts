@@ -8,11 +8,12 @@ import { type Sidecar, openSidecar } from './surfaces/sidecar.js';
 
 const PROJECT_DIR = '-Users-joe-proj';
 const SESSION = 's-e';
+const CWD = '/Users/joe/proj';
 
 const transcript = `${JSON.stringify({
   type: 'user',
   sessionId: SESSION,
-  cwd: '/Users/joe/proj',
+  cwd: CWD,
   timestamp: '2026-01-01T00:00:00.000Z',
   message: { role: 'user', content: [{ type: 'text', text: 'wire up the engine' }] },
 })}\n`;
@@ -33,7 +34,7 @@ const appendMidSynthesis = (file: string): Promise<string> => {
     `${transcript.trimEnd()}\n${JSON.stringify({
       type: 'user',
       sessionId: SESSION,
-      cwd: '/Users/joe/proj',
+      cwd: CWD,
       timestamp: '2026-01-02T00:00:00.000Z',
       message: { role: 'user', content: [{ type: 'text', text: 'appended mid-synthesis' }] },
     })}\n`,
@@ -114,5 +115,117 @@ describe('engine', () => {
     const second = await backfill(sidecar, { projectsRoot: root, baseDir, llm: false });
     expect(second.skipped).toBe(1);
     expect(second.written).toBe(0);
+  });
+});
+
+const THREE = 3;
+const SIX = 6;
+const EIGHT = 8;
+const TEN = 10;
+const TWO = 2;
+
+const seedBatch = (dir: string, count: number): void => {
+  for (let index = 0; index < count; index += 1) {
+    const id = `s-batch-${index}`;
+    writeFileSync(
+      path.join(dir, `${id}.jsonl`),
+      `${JSON.stringify({
+        type: 'user',
+        sessionId: id,
+        cwd: CWD,
+        timestamp: '2026-01-01T00:00:00.000Z',
+        message: { role: 'user', content: [{ type: 'text', text: `session ${index}` }] },
+      })}\n`,
+    );
+  }
+};
+
+/**
+ * Enrichment failure is deliberately not an error — one degraded record beats a failed run. The
+ * hazard is that nothing throws, `failed` stays 0, and a run that lost the LLM entirely reports a
+ * clean sweep. It also gets there sooner than a healthy run, because a failing call returns in
+ * milliseconds where a successful one takes seconds.
+ */
+describe('engine — LLM degradation is visible and bounded', () => {
+  let root: string;
+  let baseDir: string;
+  let projectDir: string;
+  let sidecar: Sidecar;
+
+  beforeEach(() => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-deg-'));
+    root = path.join(tmp, 'projects');
+    baseDir = path.join(tmp, 'base');
+    projectDir = path.join(root, PROJECT_DIR);
+    mkdirSync(projectDir, { recursive: true });
+    sidecar = openSidecar(':memory:');
+  });
+  afterEach(() => {
+    sidecar.close();
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  it('counts heuristic fallbacks separately from writes', async () => {
+    seedBatch(projectDir, THREE);
+    const summary = await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      llm: () => Promise.reject(new Error('429 rate limited')),
+    });
+    // Every record still lands — that is the intended degradation. What must not happen is the
+    // summary being indistinguishable from a healthy run.
+    expect(summary.written).toBe(THREE);
+    expect(summary.failed).toBe(0);
+    expect(summary.degraded).toBe(THREE);
+    expect(summary.enriched).toBe(0);
+  });
+
+  it('aborts once LLM failures are consecutive and systematic', async () => {
+    seedBatch(projectDir, TEN);
+    const summary = await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      maxConsecutiveLlmFailures: THREE,
+      llm: () => Promise.reject(new Error('worker down')),
+    });
+    expect(summary.abortedReason).toMatch(/consecutive LLM failures/);
+    expect(summary.processed).toBeLessThan(summary.total);
+  });
+
+  it('does not abort when failures are intermittent rather than systematic', async () => {
+    seedBatch(projectDir, SIX);
+    let calls = 0;
+    const summary = await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      maxConsecutiveLlmFailures: THREE,
+      llm: () => {
+        calls += 1;
+        return calls % TWO === 0
+          ? Promise.reject(new Error('flaky'))
+          : Promise.resolve(STUB_ENRICHMENT);
+      },
+    });
+    // A success resets the counter, so alternating failures must never trip the breaker.
+    expect(summary.abortedReason).toBeUndefined();
+    expect(summary.processed).toBe(summary.total);
+    expect(summary.enriched).toBeGreaterThan(0);
+    expect(summary.degraded).toBeGreaterThan(0);
+  });
+
+  it('stops at the LLM call ceiling even with files remaining', async () => {
+    seedBatch(projectDir, EIGHT);
+    const summary = await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      maxLlmCalls: TWO,
+      llm: () => Promise.resolve(STUB_ENRICHMENT),
+    });
+    expect(summary.abortedReason).toMatch(/max-llm-calls/);
+    expect(summary.processed).toBeLessThan(summary.total);
   });
 });

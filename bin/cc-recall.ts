@@ -61,6 +61,7 @@ interface BackfillCliOptions extends DbOptions {
   limit?: string;
   dryRun?: boolean;
   force?: boolean;
+  maxLlmCalls?: string;
 }
 interface MigrateCliOptions {
   from: string;
@@ -104,6 +105,7 @@ const backfillOptionsFrom = (cli: BackfillCliOptions): BackfillOptions => {
   if (!cli.llm) options.llm = false;
   if (cli.scope) options.scope = cli.scope;
   if (cli.limit) options.limit = Number(cli.limit);
+  if (cli.maxLlmCalls) options.maxLlmCalls = Number(cli.maxLlmCalls);
   return options;
 };
 
@@ -134,6 +136,16 @@ const runBackfill = async (cli: BackfillCliOptions): Promise<void> => {
     out(
       `backfill: ${summary.processed}/${summary.total} processed, ${summary.written} written, ${summary.skipped} skipped, ${summary.failed} failed`,
     );
+    // Enrichment quality is reported separately from success. A run where every LLM call failed
+    // still writes every record — from these two numbers alone it was indistinguishable from a
+    // healthy run, and it finished sooner.
+    if (summary.enriched > 0 || summary.degraded > 0) {
+      out(`  enrichment: ${summary.enriched} enriched, ${summary.degraded} fell back to heuristic`);
+    }
+    if (summary.abortedReason !== undefined) {
+      process.exitCode = 1;
+      err(`backfill stopped early — ${summary.abortedReason}. The corpus is only partly indexed.`);
+    }
   } finally {
     sidecar.close();
   }
@@ -284,6 +296,7 @@ program
   .option(BASE_FLAG, BASE_DESC, baseDirDefault())
   .option('--scope <substring>', 'only project dirs containing this substring')
   .option('--limit <n>', 'stop after N transcripts')
+  .option('--max-llm-calls <n>', 'hard ceiling on LLM calls (--limit caps files, not spend)')
   .option(NO_LLM_FLAG, NO_LLM_DESC)
   .option('--dry-run', DRY_RUN_DESC)
   .option('--force', FORCE_DESC)
