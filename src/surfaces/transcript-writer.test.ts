@@ -168,9 +168,12 @@ describe('transcript-writer — content preservation', () => {
 
   // The window that matters spans the CALLER's read, synthesis, and this write. The writer does
   // read the file — once, to compute the source hash — but deliberately does not re-read to
-  // compare, because two reads microseconds apart would catch nothing. A record synthesized from
-  // older content must not be stamped with the current hash, or the next run's idempotency check
-  // matches and skips forever, leaving the in-transcript record stale while the sidecar moves on.
+  // compare, because two reads microseconds apart would catch nothing here. A record synthesized
+  // from older content must not be stamped with the current hash, or the next run's idempotency
+  // check matches and skips forever, leaving the in-transcript record stale while the sidecar
+  // moves on. The revert path *does* re-read and is right to — its window is synchronous and
+  // bounded, while this one contains an LLM call. Same module, opposite conclusion, because the
+  // two windows are different shapes.
   it('refuses to write a record synthesized from content the file has grown past', () => {
     const before = writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
     const staleHash = before.sourceHash;

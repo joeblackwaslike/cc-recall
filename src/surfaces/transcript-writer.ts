@@ -243,12 +243,80 @@ const discardSnapshot = (snapshot: string, onWarn?: (message: string) => void): 
 };
 
 /**
+ * Remove a temp file whose staging failed.
+ *
+ * The write already failed, so this cannot fail it further — but a temp file that survives for a
+ * *permissions* reason sits in the way of the next attempt's rename, and that failure surfaces
+ * with a confusing message unless the real cause was recorded here.
+ */
+const discardStagingFile = (tmp: string): void => {
+  try {
+    unlinkSync(tmp);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      writeStderr(`failed to remove partial temp file (${code ?? 'unknown'}): ${tmp}`);
+    }
+  }
+};
+
+/**
+ * fsync the directory so the rename itself survives a crash.
+ *
+ * Runs *after* the commit point, so nothing here may throw: a failure would send the caller into
+ * a restore path over content that is perfectly fine. Two distinct reasons it can fail, and they
+ * are not the same finding:
+ *
+ *   - the filesystem does not implement it (tmpfs and other virtual filesystems, Windows).
+ *     Kernels and Node versions disagree on the code, so `QUIET_FSYNC_CODES` covers the family
+ *     and stays silent — on ext4/xfs/btrfs it simply succeeds.
+ *   - everything else — EMFILE / EIO / EACCES / a path that stopped being a directory among them
+ *     (illustrative, not exhaustive: any code outside the quiet set lands here). These mean
+ *     durability is degrading silently, the condition nobody discovers until an incident.
+ */
+const fsyncParentDirectory = (filePath: string, onWarn?: (message: string) => void): void => {
+  let dirFd: number | undefined;
+  try {
+    dirFd = openSync(path.dirname(filePath), 'r');
+    fsyncSync(dirFd);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // `?? ''` deliberately makes an absent code *not* quiet: an error that arrives without one
+    // is unclassifiable, and unclassifiable is not the same as known-benign.
+    if (!QUIET_FSYNC_CODES.has(code ?? '')) {
+      reportWarning(
+        onWarn,
+        `directory fsync failed (${code ?? 'unknown'}), write committed but not durable: ${filePath}`,
+      );
+    }
+  } finally {
+    // `closeSync` can itself throw (EBADF, or EIO on some filesystems). Post-`renameSync` that
+    // would be a throw from a *committed* write, which is exactly what this whole block exists
+    // to prevent — and worse than a plain failure, because a caller with a restore path would
+    // roll back content that landed correctly. Releasing the fd is best-effort like everything
+    // else after the commit point.
+    if (dirFd !== undefined) {
+      try {
+        closeSync(dirFd);
+      } catch (error) {
+        writeStderr(
+          `failed to close directory fd after fsync (${(error as NodeJS.ErrnoException).code ?? 'unknown'}): ${filePath}`,
+        );
+      }
+    }
+  }
+};
+
+/**
  * Write via temp file + rename, durably.
  *
- * `renameSync` alone gives metadata atomicity but not durability: without fsync on the temp
- * fd there is a window where a crash leaves a zero-length or partially-written file at the
- * real path, and without fsync on the directory the rename itself may not survive. Both
- * matter here because the auto-restore path would then be restoring over damaged content.
+ * `renameSync` alone gives metadata atomicity but not durability: without fsync on the temp fd
+ * there is a window where a crash leaves a zero-length or partially-written file at the real
+ * path, and without fsync on the directory the rename itself may not survive. Both matter here
+ * because the auto-restore path would otherwise be restoring over damaged content.
+ *
+ * `renameSync` is the commit point. Everything before it may fail the operation; nothing after
+ * it may.
  */
 const atomicWrite = (
   filePath: string,
@@ -269,50 +337,10 @@ const atomicWrite = (
     didStage = true;
   } finally {
     closeSync(fd);
-    if (!didStage) {
-      // A partial temp file would otherwise sit at a predictable path until the next write
-      // happened to overwrite it — no data loss, but it survives as a plausible-looking file.
-      try {
-        unlinkSync(tmp);
-      } catch {
-        /* the write already failed; there is nothing more useful to do here */
-      }
-    }
+    if (!didStage) discardStagingFile(tmp);
   }
   renameSync(tmp, filePath);
-
-  // `renameSync` above is the commit point: the content is visible at the real path. Everything
-  // below is a durability nicety, so *nothing* here may fail the operation — a throw would send
-  // the caller into the restore path over content that is fine. That applies to `openSync` as
-  // much as `fsyncSync`: a missing or unreadable directory is a reason to skip the fsync, not to
-  // undo a committed write. `dirFd` is only closed when it was actually opened, so a failed open
-  // can neither leak nor double-close.
-  //
-  // Two distinct reasons the fsync can fail, and they are not the same finding:
-  //   - the filesystem does not implement it (tmpfs and other virtual filesystems, Windows).
-  //     Kernels and Node versions disagree on the code, so `QUIET_FSYNC_CODES` covers the family
-  //     and stays silent — on ext4/xfs/btrfs it simply succeeds.
-  //   - everything else, EMFILE / EIO / EACCES / a path that stopped being a directory among
-  //     them (an illustrative list, not an exhaustive one — any code outside the quiet set lands
-  //     here). These mean durability is degrading silently, which is exactly the condition
-  //     nobody discovers until an incident.
-  let dirFd: number | undefined;
-  try {
-    dirFd = openSync(path.dirname(filePath), 'r');
-    fsyncSync(dirFd);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    // `?? ''` deliberately makes an absent code *not* quiet: an error that arrives without one
-    // is unclassifiable, and unclassifiable is not the same as known-benign.
-    if (!QUIET_FSYNC_CODES.has(code ?? '')) {
-      reportWarning(
-        onWarn,
-        `directory fsync failed (${code ?? 'unknown'}), write committed but not durable: ${filePath}`,
-      );
-    }
-  } finally {
-    if (dirFd !== undefined) closeSync(dirFd);
-  }
+  fsyncParentDirectory(filePath, onWarn);
 };
 
 const isIntegrityValid = (filePath: string, record: RecallRecord, origErrors: number): boolean => {
@@ -349,6 +377,11 @@ export const writeRecordToTranscript = (
   // spans the caller's read, synthesis (up to the LLM timeout), and this write, so the guard
   // belongs at the caller level via `expectedSourceHash`: the record must have been synthesized
   // from the content at that hash, not from an older snapshot.
+  //
+  // This is about *where* the window is, not a claim that re-reading is useless — `didRevertTranscript`
+  // does re-read and compare, correctly. Its window is synchronous and bounded (read, classify,
+  // write), so a second read genuinely narrows it. Here the window contains an LLM call, which no
+  // amount of re-reading inside this function can cover.
   if (options.expectedSourceHash !== undefined && options.expectedSourceHash !== sourceHash) {
     return { written: false, skipped: true, skipReason: 'stale-source', sourceHash, backupPath };
   }
@@ -441,7 +474,18 @@ export const didRevertTranscript = (
   try {
     atomicWrite(filePath, kept.length === 0 ? '' : `${kept.join('\n')}\n`, options.onWarn);
   } catch (error) {
-    copyFileSync(snapshot, filePath);
+    // Restore is best-effort and must not become the error the caller sees. If the snapshot copy
+    // fails too — the disk that killed the write is often the same disk — throwing that instead
+    // would replace the root cause with its own symptom, and the operator loses the only line
+    // that explains what actually happened.
+    try {
+      copyFileSync(snapshot, filePath);
+    } catch (restoreError) {
+      reportWarning(
+        options.onWarn,
+        `restore after failed strip also failed, transcript may be partially written: ${filePath} (${String(restoreError)})`,
+      );
+    }
     throw error;
   } finally {
     discardSnapshot(snapshot, options.onWarn);

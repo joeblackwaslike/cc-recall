@@ -5,7 +5,7 @@
 // synchronous reads, so `node:fs` is mocked here — in its own file, so the rest of the suite
 // keeps running against the real thing.
 import type * as NodeFs from 'node:fs';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,6 +14,10 @@ import { synthesizeHeuristic } from '../record/synthesizer.js';
 import { parseTranscriptText } from '../transcript/parse.js';
 import { didRevertTranscript, writeRecordToTranscript } from './transcript-writer.js';
 
+// Arm this only AFTER per-test setup has finished: `beforeEach` calls writeRecordToTranscript,
+// which reads the file itself, so a hook armed earlier would fire on the wrong read. It is
+// one-shot (cleared as it fires) and reset in afterEach, so the ordering is safe as written —
+// but it is an ordering dependency, and reordering setup would break it silently.
 const fsHook = vi.hoisted(() => ({ afterNextRead: null as null | (() => void) }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -99,6 +103,11 @@ describe('transcript-writer — revert concurrent-modification guard', () => {
     const after = readFileSync(file, 'utf8');
     expect(after).toContain(RECALL_RECORD_TYPE);
     expect(after).toContain(APPENDED);
+
+    // Bailing out must not leave a snapshot behind. The guard returns before any snapshot is
+    // taken, and this pins that ordering — moving `takePreWriteSnapshot` above the guard would
+    // leak a .prewrite on every concurrent-modification bail, silently and forever.
+    expect(readdirSync(dir).filter((f) => f.endsWith('.prewrite'))).toEqual([]);
   });
 
   it('strips normally when nothing changes underneath it', () => {
