@@ -81,6 +81,12 @@ const { INDEXER_PROJECT_DIR, backfill, indexSession, listTranscripts } = await i
 const { openSidecar } = await import('./surfaces/sidecar.js');
 
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
+
+const OVERRIDE_MODEL = 'claude-sonnet-5';
+const WHITESPACE_ONLY = '\t \n';
+
+/** The argv `runClaudeHeadless` should produce for a given model. */
+const invocation = (model: string): string[] => ['-p', '--model', model];
 const REAL_PROJECT_DIR = '-Users-joe-proj';
 
 const transcriptOf = (sessionId: string, firstPrompt: string): string =>
@@ -92,8 +98,12 @@ const transcriptOf = (sessionId: string, firstPrompt: string): string =>
     message: { role: 'user', content: [{ type: 'text', text: firstPrompt }] },
   })}\n`;
 
-// Verbatim opening line of the enrichment prompt — a historical indexer transcript looks
-// exactly like this, which is the only way to recognise runs written before INDEXER_CWD existed.
+// Golden fixture, deliberately NOT derived from INDEXER_PROMPT_FIRST_LINE.
+//
+// 2,507 enrichment transcripts already exist on disk with exactly this opening text, and
+// detection must keep matching them forever. Importing the production constant here would make
+// this test pass trivially if that constant were ever edited — silently stranding every
+// historical transcript. The duplication is the assertion.
 const INDEXER_PROMPT =
   'You are indexing a Claude Code session transcript so it can be found later by what\nwas DONE, ASKED, and QUESTIONED.';
 
@@ -110,13 +120,28 @@ describe('enrichment subprocess invocation', () => {
   it('pins the model instead of inheriting the interactive default', async () => {
     await runClaudeHeadless('prompt');
     expect(spawnCalls).toHaveLength(1);
-    expect(spawnCalls[0]?.args).toEqual(['-p', '--model', DEFAULT_MODEL]);
+    expect(spawnCalls[0]?.args).toEqual(invocation(DEFAULT_MODEL));
   });
 
   it('honours CC_RECALL_MODEL without a module reload', async () => {
-    vi.stubEnv('CC_RECALL_MODEL', 'claude-sonnet-5');
+    vi.stubEnv('CC_RECALL_MODEL', OVERRIDE_MODEL);
     await runClaudeHeadless('prompt');
-    expect(spawnCalls[0]?.args).toEqual(['-p', '--model', 'claude-sonnet-5']);
+    expect(spawnCalls[0]?.args).toEqual(invocation(OVERRIDE_MODEL));
+  });
+
+  it.each([
+    ['empty', ''],
+    ['whitespace', WHITESPACE_ONLY],
+  ])('falls back to the default when CC_RECALL_MODEL is %s', async (_label, value) => {
+    vi.stubEnv('CC_RECALL_MODEL', value);
+    await runClaudeHeadless('prompt');
+    expect(spawnCalls[0]?.args).toEqual(invocation(DEFAULT_MODEL));
+  });
+
+  it('trims a padded CC_RECALL_MODEL rather than passing it through', async () => {
+    vi.stubEnv('CC_RECALL_MODEL', '  claude-sonnet-5  ');
+    await runClaudeHeadless('prompt');
+    expect(spawnCalls[0]?.args).toEqual(invocation(OVERRIDE_MODEL));
   });
 
   it('runs in the dedicated indexer cwd so its own transcript is excludable', async () => {

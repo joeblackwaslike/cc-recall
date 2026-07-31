@@ -46,8 +46,17 @@ const MAX_DIGEST_COMPLETIONS = 4;
 // no measurable gain on structured extraction. Override via CC_RECALL_MODEL.
 const DEFAULT_INDEXER_MODEL = 'claude-haiku-4-5-20251001';
 
-/** Resolved per call so an override takes effect without a module reload. */
-const indexerModel = (): string => process.env.CC_RECALL_MODEL ?? DEFAULT_INDEXER_MODEL;
+/**
+ * Resolved per call so an override takes effect without a module reload.
+ *
+ * `??` alone would let `CC_RECALL_MODEL=""` through and spawn `--model ''`, which fails the
+ * subprocess for every session in a run — the failure mode this module exists to avoid.
+ */
+const indexerModel = (): string => {
+  const override = process.env.CC_RECALL_MODEL;
+  const trimmed = typeof override === 'string' ? override.trim() : '';
+  return trimmed === '' ? DEFAULT_INDEXER_MODEL : trimmed;
+};
 
 /**
  * Dedicated cwd for enrichment subprocesses.
