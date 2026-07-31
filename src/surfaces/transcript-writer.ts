@@ -68,6 +68,13 @@ export interface WriteOptions {
    * modification, which returns the same `false` as "no record found".
    */
   onWarn?: (message: string) => void;
+  /**
+   * Integrity predicate, injectable so the restore path can be exercised. Mirrors the
+   * `SynthesizeOptions.llm` seam. Without it the most safety-critical branch in this module —
+   * what a failed write restores — is unreachable from a test, which is precisely the branch
+   * that used to roll a resumed session back to its first-indexed state.
+   */
+  verifyIntegrity?: (filePath: string, record: RecallRecord, origErrors: number) => boolean;
 }
 
 export interface WriteResult {
@@ -252,7 +259,8 @@ export const writeRecordToTranscript = (
   try {
     atomicWrite(filePath, buildContent(kept, record, sourceHash));
 
-    if (!isIntegrityValid(filePath, record, origErrors)) {
+    const verify = options.verifyIntegrity ?? isIntegrityValid;
+    if (!verify(filePath, record, origErrors)) {
       copyFileSync(snapshot, filePath); // restore what we read, not the first-ever backup
       throw new Error(`integrity check failed for ${record.session_id}; restored pre-write state`);
     }

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -100,6 +100,17 @@ describe('transcript-writer', () => {
   // added in between. These pin the two paths where that could happen.
 });
 
+describe('transcript-writer — snapshot hygiene', () => {
+  const ctx = useTranscript();
+
+  it('a successful write leaves no .prewrite snapshot behind', () => {
+    const { dir, file } = ctx.get();
+    writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
+    const leftovers = readdirSync(path.join(dir, 'backups')).filter((f) => f.endsWith('.prewrite'));
+    expect(leftovers).toEqual([]);
+  });
+});
+
 describe('transcript-writer — content preservation', () => {
   const ctx = useTranscript();
   let dir: string;
@@ -168,6 +179,29 @@ describe('transcript-writer — content preservation', () => {
     );
     expect(result.written).toBe(true);
     expect(readFileSync(file, 'utf8')).toContain('newer turn');
+  });
+
+  // The single most important property in this module, and the exact C2 defect: when a write
+  // fails its integrity check, it must restore what was on disk immediately before THIS write —
+  // not the first-ever backup, which for a resumed session is weeks behind.
+  it('integrity failure restores the pre-write state, not the stale original backup', () => {
+    // First write establishes the original backup at the session's initial size.
+    writeRecordToTranscript(file, makeRecord(), { baseDir: dir });
+
+    // Session is resumed and grows well past what that backup captured.
+    const grown = `${readFileSync(file, 'utf8').trimEnd()}\n${laterTurn('work done weeks later')}\n`;
+    writeFileSync(file, grown);
+
+    expect(() =>
+      writeRecordToTranscript(file, makeRecord(), {
+        baseDir: dir,
+        verifyIntegrity: () => false,
+      }),
+    ).toThrow(/integrity check failed/);
+
+    const after = readFileSync(file, 'utf8');
+    expect(after).toBe(grown); // exactly the pre-write state
+    expect(after).toContain('work done weeks later'); // and NOT the original backup
   });
 
   it('opting into the original backup is still available and explicit', () => {
