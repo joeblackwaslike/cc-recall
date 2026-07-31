@@ -179,11 +179,20 @@ const atomicWrite = (filePath: string, content: string): void => {
     closeSync(fd);
   }
   renameSync(tmp, filePath);
-  const dir = openSync(path.dirname(filePath), 'r');
+
+  // Directory fsync is a durability improvement, not a correctness requirement — the rename
+  // has already succeeded. It is also not portable: fsync on a directory fd raises EINVAL on
+  // some Linux filesystems and is unsupported on Windows. Letting it throw would fail a write
+  // that actually landed, and send the caller down the restore path over good content.
   try {
-    fsyncSync(dir);
-  } finally {
-    closeSync(dir);
+    const dir = openSync(path.dirname(filePath), 'r');
+    try {
+      fsyncSync(dir);
+    } finally {
+      closeSync(dir);
+    }
+  } catch {
+    /* durability best-effort; the rename is already committed */
   }
 };
 
@@ -226,14 +235,18 @@ export const writeRecordToTranscript = (
   const origErrors = parseTranscriptText(original, filePath).parseErrors;
   ensureOriginalBackup(filePath, backupPath);
   const snapshot = takePreWriteSnapshot(filePath, backupPath);
-  atomicWrite(filePath, buildContent(kept, record, sourceHash));
+  try {
+    atomicWrite(filePath, buildContent(kept, record, sourceHash));
 
-  if (!isIntegrityValid(filePath, record, origErrors)) {
-    copyFileSync(snapshot, filePath); // restore what we read, not the first-ever backup
+    if (!isIntegrityValid(filePath, record, origErrors)) {
+      copyFileSync(snapshot, filePath); // restore what we read, not the first-ever backup
+      throw new Error(`integrity check failed for ${record.session_id}; restored pre-write state`);
+    }
+  } finally {
+    // Also runs when atomicWrite itself throws (disk full, EACCES), so a failed write does not
+    // leave a .prewrite file behind to accumulate alongside the backups it shadows.
     discardSnapshot(snapshot);
-    throw new Error(`integrity check failed for ${record.session_id}; restored pre-write state`);
   }
-  discardSnapshot(snapshot);
   return { written: true, skipped: false, sourceHash, backupPath };
 };
 
@@ -282,6 +295,12 @@ export const didRevertTranscript = (
   const current = readFileSync(filePath, 'utf8');
   if (!hasRecordFor(current, sessionId)) return false;
   const { kept } = classify(current);
+
+  // Same race as the write path: a live session can append between this read and the write,
+  // and `kept` was derived from the earlier content. Re-read and bail rather than rebuilding
+  // the file from a stale view — the caller can revert again once the session is idle.
+  if (readFileSync(filePath, 'utf8') !== current) return false;
+
   atomicWrite(filePath, kept.length === 0 ? '' : `${kept.join('\n')}\n`);
   return true;
 };

@@ -110,8 +110,10 @@ const backfillOptionsFrom = (cli: BackfillCliOptions): BackfillOptions => {
 const runIndex = async (file: string, cli: IndexCliOptions): Promise<void> => {
   // The SessionEnd hook passes a transcript_path that may have been moved by `migrate` or
   // deleted since the session ended. Without this guard the ENOENT from readFileSync becomes
-  // an unhandled rejection that aborts the process — 13,052 such crashes accumulated in the
-  // log, each killing one indexer run silently because the hook had already detached.
+  // an unhandled rejection that aborts the process, killing the indexer run silently because
+  // the hook has already detached. This was the single largest source of crash-loops in
+  // session-end.log. The guard is advisory — the file can still vanish before the read, which
+  // the top-level catch handles.
   if (!existsSync(file)) {
     err(`skip: transcript no longer exists: ${file}`);
     return;
