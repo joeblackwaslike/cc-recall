@@ -213,8 +213,29 @@ const reportSidecar = (db: string): void => {
   }
 };
 
+const MIB = 1_048_576;
+
+/** Reclaim SQLite free pages. Never fatal — doctor reports health, it does not gate on cleanup. */
+const compactSidecar = (db: string): void => {
+  const sidecar = openSidecar(db);
+  try {
+    const { before, after } = sidecar.vacuum();
+    const saved = before - after;
+    out(
+      saved > 0
+        ? `vacuum: reclaimed ${(saved / MIB).toFixed(1)}MB (${(before / MIB).toFixed(1)} → ${(after / MIB).toFixed(1)}MB)`
+        : `vacuum: nothing to reclaim (${(after / MIB).toFixed(1)}MB)`,
+    );
+  } catch (error) {
+    err(`vacuum: skipped — ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    sidecar.close();
+  }
+};
+
 const runDoctor = async (options: { db: string }): Promise<void> => {
   reportSidecar(options.db);
+  compactSidecar(options.db);
   // G0 (spec §12): claude-mem must pass before surface ③ is enabled.
   const g0 = await verifyClaudeMemG0();
   out(

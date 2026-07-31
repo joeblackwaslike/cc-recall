@@ -84,6 +84,16 @@ export interface Sidecar {
   /** Most significant sessions (by line count), for the native-memory front page. */
   top: (limit: number) => RecallRecord[];
   stats: () => SidecarStats;
+  /**
+   * Reclaim space from deleted rows. Returns bytes before and after.
+   *
+   * SQLite never shrinks a file on its own — freed pages are reused but the file stays at its
+   * high-water mark, so a store that has churned through re-indexes keeps every page it ever
+   * needed. VACUUM rewrites it compactly. It is safe to run at any time and the sidecar is
+   * rebuildable from transcripts regardless, which is why this belongs in `doctor` rather than
+   * behind a confirmation.
+   */
+  vacuum: () => { before: number; after: number };
   close: () => void;
 }
 
@@ -222,6 +232,18 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
       byProvenance[row.provenance] = row.n;
     }
     return { total, byProvenance };
+  },
+  vacuum() {
+    // page_count * page_size is the file's own accounting, which is what VACUUM changes; statSync
+    // would also work but reports the same number a moment later than the pragma does.
+    const measure = (): number => {
+      const pages = (db.prepare('PRAGMA page_count').get() as { page_count: number }).page_count;
+      const size = (db.prepare('PRAGMA page_size').get() as { page_size: number }).page_size;
+      return pages * size;
+    };
+    const before = measure();
+    db.exec('VACUUM');
+    return { before, after: measure() };
   },
   close() {
     db.close();

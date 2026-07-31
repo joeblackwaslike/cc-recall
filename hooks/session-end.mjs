@@ -10,9 +10,36 @@
 //   CC_RECALL_BASE_DIR=<path>  backup/log base directory
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, openSync, readFileSync } from 'node:fs';
+import { mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+
+const BYTES_PER_MIB = 1_048_576;
+/** Rotate at 10MB, keep one previous generation. Measured at 23MB / 309k lines before this. */
+const LOG_MAX_BYTES = 10 * BYTES_PER_MIB;
+
+/**
+ * Roll the log over when it grows past the cap.
+ *
+ * Entirely best-effort: this runs inside a SessionEnd hook, where the standing rule is that
+ * nothing may fail the session. A rotation that throws would be a worse outcome than a large
+ * log, so every step swallows. Keeping exactly one `.1` generation bounds the pair at ~20MB
+ * instead of the unbounded single file it replaces.
+ */
+const rotateIfOversized = (logPath) => {
+  try {
+    if (statSync(logPath).size < LOG_MAX_BYTES) return;
+    const previous = `${logPath}.1`;
+    try {
+      unlinkSync(previous);
+    } catch {
+      /* no previous generation to displace */
+    }
+    renameSync(logPath, previous);
+  } catch {
+    /* missing log, unwritable dir, racing hook — none of it may break the session */
+  }
+};
 
 const respond = (object) => {
   process.stdout.write(JSON.stringify(object));
@@ -53,7 +80,9 @@ if (!transcriptPath || !pluginRoot) {
   try {
     const logDir = path.join(baseDir, 'logs');
     mkdirSync(logDir, { recursive: true });
-    const logFd = openSync(path.join(logDir, 'session-end.log'), 'a');
+    const logPath = path.join(logDir, 'session-end.log');
+    rotateIfOversized(logPath);
+    const logFd = openSync(logPath, 'a');
     const child = spawn(process.execPath, [cli, ...args], {
       detached: true,
       stdio: ['ignore', logFd, logFd],
