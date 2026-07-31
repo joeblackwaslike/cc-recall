@@ -361,6 +361,21 @@ program
     }
   });
 
+// The try below only covers rejections that propagate through the awaited parseAsync. A promise
+// that settles late or was never awaited — a detached handle, a fire-and-forget write — escapes
+// it entirely, and Node's default is to print a raw stack dump and abort. Under the SessionEnd
+// hook that process is already detached, so the abort is invisible: the run simply stops, and
+// session-end.log gets a V8 dump with no indication of which transcript caused it.
+//
+// This does not swallow the failure. The exit stays non-zero; it only makes the reason
+// attributable, which is the difference between a diagnosable log line and 13,052 mystery entries.
+process.on('unhandledRejection', (reason) => {
+  err(
+    `cc-recall: unhandled rejection — ${reason instanceof Error ? reason.stack : String(reason)}`,
+  );
+  process.exitCode = 1;
+});
+
 // A rejection here would otherwise surface as a raw V8 stack dump and a non-zero exit with no
 // actionable message — the failure mode that made the ENOENT crashes so hard to attribute.
 try {
