@@ -9,6 +9,9 @@
 // retrieval never depends on the LLM being available (AGENTS.md).
 
 import { spawn } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import { z } from 'zod';
 import type { ParsedTranscript } from '../transcript/parse.js';
 import {
@@ -37,6 +40,55 @@ const LLM_TIMEOUT_MS = 60_000;
 const MAX_DIGEST_PROMPTS = 12;
 const PROMPT_SNIPPET = 500;
 const MAX_DIGEST_COMPLETIONS = 4;
+
+// Enrichment is a summarize-to-JSON task over a ~4k digest. It must not inherit the
+// user's interactive model: an Opus-class default costs roughly 20x per call here for
+// no measurable gain on structured extraction. Override via CC_RECALL_MODEL.
+const DEFAULT_INDEXER_MODEL = 'claude-haiku-4-5-20251001';
+
+/**
+ * Resolved per call so an override takes effect without a module reload.
+ *
+ * `??` alone would let `CC_RECALL_MODEL=""` through and spawn `--model ''`, which fails the
+ * subprocess for every session in a run — the failure mode this module exists to avoid.
+ */
+const indexerModel = (): string => {
+  const override = process.env.CC_RECALL_MODEL;
+  const trimmed = typeof override === 'string' ? override.trim() : '';
+  return trimmed === '' ? DEFAULT_INDEXER_MODEL : trimmed;
+};
+
+/**
+ * Dedicated cwd for enrichment subprocesses.
+ *
+ * `claude -p` always writes a transcript of its own run. Inheriting the caller's cwd
+ * scatters those beside real sessions, so the backfill re-indexes its own output and the
+ * corpus grows as fast as it is consumed — the queue never drains. Pinning a cwd puts
+ * every indexer run in one project dir that `listTranscripts` can skip wholesale.
+ */
+export const INDEXER_CWD = path.join(homedir(), '.claude', 'cc-recall', 'indexer');
+
+/**
+ * Opening of the enrichment prompt, used both to build it and to recognize an indexer run
+ * when re-encountering one. Kept as a constant so the two cannot drift: detection must keep
+ * matching transcripts written before the dedicated cwd existed.
+ *
+ * Spans two lines deliberately. A one-line sentinel ending at "…by what" is short enough that
+ * a genuine user session opening with the same phrasing would be misclassified and silently
+ * skipped; carrying through "was DONE, ASKED, and QUESTIONED." makes a collision implausible.
+ * Verified against the enrichment transcripts already on disk, which begin with exactly this.
+ */
+const INDEXER_PROMPT_SIGNATURE =
+  'You are indexing a Claude Code session transcript so it can be found later by what\nwas DONE, ASKED, and QUESTIONED.';
+
+/**
+ * Whether a transcript's opening prompt marks it as one of our own enrichment runs.
+ *
+ * A blank or absent prompt is treated as a real session — skipping is the destructive choice
+ * here, so anything we cannot positively identify passes through to normal indexing.
+ */
+export const isIndexerTranscript = (firstUserPrompt: string | undefined): boolean =>
+  firstUserPrompt?.trimStart().startsWith(INDEXER_PROMPT_SIGNATURE) ?? false;
 
 /** Tools whose invocation means a file was created or modified. */
 const EDIT_TOOLS = new Set([
@@ -223,8 +275,7 @@ const buildDigest = (parsed: ParsedTranscript): string => {
 
 const buildLlmPrompt = (parsed: ParsedTranscript): string =>
   [
-    'You are indexing a Claude Code session transcript so it can be found later by what',
-    'was DONE, ASKED, and QUESTIONED. Read the digest and reply with ONLY a JSON object',
+    `${INDEXER_PROMPT_SIGNATURE} Read the digest and reply with ONLY a JSON object`,
     '(no prose, no code fences) of this exact shape:',
     '{"title":"<=80 chars, what was actually done (not how it started)",',
     '"summary":"2-4 sentences","asks_implemented":["user requests that became real changes"],',
@@ -249,8 +300,12 @@ export type LlmRunner = (prompt: string) => Promise<string>;
 /** Default runner: pipe the prompt to `claude -p` over stdin. */
 export const runClaudeHeadless: LlmRunner = (prompt) =>
   new Promise<string>((resolve, reject) => {
+    mkdirSync(INDEXER_CWD, { recursive: true });
     // eslint-disable-next-line sonarjs/no-os-command-from-path -- intentionally invoke the user's installed `claude` CLI via PATH
-    const child = spawn('claude', ['-p'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('claude', ['-p', '--model', indexerModel()], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: INDEXER_CWD,
+    });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
