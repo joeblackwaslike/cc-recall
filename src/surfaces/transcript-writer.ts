@@ -192,7 +192,11 @@ const discardSnapshot = (snapshot: string): void => {
  * real path, and without fsync on the directory the rename itself may not survive. Both
  * matter here because the auto-restore path would then be restoring over damaged content.
  */
-const atomicWrite = (filePath: string, content: string): void => {
+const atomicWrite = (
+  filePath: string,
+  content: string,
+  onWarn?: (message: string) => void,
+): void => {
   const tmp = `${filePath}${TMP_SUFFIX}`;
   const fd = openSync(tmp, 'w');
   try {
@@ -213,12 +217,22 @@ const atomicWrite = (filePath: string, content: string): void => {
   // That applies to `openSync` as much as `fsyncSync`: a missing or unreadable directory is a
   // reason to skip the fsync, not to undo a committed write. `dir` is only closed when it was
   // actually opened, so a failed open cannot leak or double-close.
+  //
+  // Not failing is not the same as not reporting. EINVAL/ENOTSUP are expected on filesystems
+  // that do not support directory fsync and stay quiet; anything else — EMFILE, EIO, EACCES,
+  // a path that stopped being a directory — means durability is degrading silently, which is
+  // exactly the condition nobody would otherwise discover until an incident.
   let dir: number | undefined;
   try {
     dir = openSync(path.dirname(filePath), 'r');
     fsyncSync(dir);
-  } catch {
-    /* EINVAL on some Linux filesystems, unsupported on Windows, EACCES on the directory */
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EINVAL' && code !== 'ENOTSUP') {
+      onWarn?.(
+        `directory fsync failed (${code ?? 'unknown'}), write committed but not durable: ${filePath}`,
+      );
+    }
   } finally {
     if (dir !== undefined) closeSync(dir);
   }
@@ -264,7 +278,7 @@ export const writeRecordToTranscript = (
   ensureOriginalBackup(filePath, backupPath);
   const snapshot = takePreWriteSnapshot(filePath, backupPath);
   try {
-    atomicWrite(filePath, buildContent(kept, record, sourceHash));
+    atomicWrite(filePath, buildContent(kept, record, sourceHash), options.onWarn);
 
     const verify = options.verifyIntegrity ?? isIntegrityValid;
     if (!verify(filePath, record, origErrors)) {
@@ -337,6 +351,6 @@ export const didRevertTranscript = (
     return false;
   }
 
-  atomicWrite(filePath, kept.length === 0 ? '' : `${kept.join('\n')}\n`);
+  atomicWrite(filePath, kept.length === 0 ? '' : `${kept.join('\n')}\n`, options.onWarn);
   return true;
 };
