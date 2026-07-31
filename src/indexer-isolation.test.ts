@@ -99,12 +99,13 @@ const transcriptOf = (sessionId: string, firstPrompt: string): string =>
     message: { role: 'user', content: [{ type: 'text', text: firstPrompt }] },
   })}\n`;
 
-// Golden fixture, deliberately NOT derived from INDEXER_PROMPT_FIRST_LINE.
+// Golden fixture, deliberately NOT derived from the production constant
+// (`INDEXER_PROMPT_SIGNATURE` in src/record/synthesizer.ts).
 //
-// 2,507 enrichment transcripts already exist on disk with exactly this opening text, and
-// detection must keep matching them forever. Importing the production constant here would make
-// this test pass trivially if that constant were ever edited — silently stranding every
-// historical transcript. The duplication is the assertion.
+// Enrichment transcripts already written to disk carry exactly this opening text, and detection
+// must keep matching them indefinitely. Importing the production constant here would make this
+// test pass trivially if that constant were ever edited — silently stranding every historical
+// transcript. The duplication is the assertion.
 const INDEXER_PROMPT =
   'You are indexing a Claude Code session transcript so it can be found later by what\nwas DONE, ASKED, and QUESTIONED.';
 
@@ -173,6 +174,12 @@ describe('isIndexerTranscript', () => {
 
   it('tolerates leading whitespace', () => {
     expect(isIndexerTranscript(`\n  ${INDEXER_PROMPT}`)).toBe(true);
+  });
+
+  // The sentinel spans a literal newline, so a CRLF-stored transcript would fail a naive
+  // startsWith and be re-indexed as a real session — quietly reopening the self-indexing loop.
+  it('matches a transcript stored with CRLF line endings', () => {
+    expect(isIndexerTranscript(INDEXER_PROMPT.replaceAll('\n', '\r\n'))).toBe(true);
   });
 
   it('does not match ordinary sessions or undefined', () => {
