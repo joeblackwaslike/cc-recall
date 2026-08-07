@@ -1,6 +1,6 @@
 {
   "name": "cc-recall",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Discoverability and enrichment for Claude Code session transcripts",
   "type": "module",
   "main": "./dist/src/index.js",
@@ -58,7 +58,9 @@
     "*.{ts,js,json,md}": [
       "biome check --write --no-errors-on-unmatched --files-ignore-unknown=true"
     ],
-    "*.ts": ["eslint --fix --max-warnings=0 --no-warn-ignored"]
+    "*.ts": [
+      "eslint --fix --max-warnings=0 --no-warn-ignored"
+    ]
   },
   "bin": {
     "cc-recall": "./dist/bin/cc-recall.js"
