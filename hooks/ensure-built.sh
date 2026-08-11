@@ -22,13 +22,16 @@ respond_and_exit() {
 }
 
 # Hash of every input that changes what dist/ should contain. Order-independent inputs (lockfile,
-# manifest) are hashed as-is; src/**/*.ts is sorted first so file-system iteration order can't
-# produce a spurious hash change.
+# manifest) are hashed as-is; the TS sources are sorted first so file-system iteration order
+# can't produce a spurious hash change. bin/ is included alongside src/ because tsconfig.json
+# compiles both into dist/ — hashing src/ alone means a bin/-only change is invisible here and
+# the stale artifact would never be rebuilt.
 current_hash() {
   {
     cat "$PLUGIN_DIR/package.json" 2>/dev/null
     cat "$PLUGIN_DIR/pnpm-lock.yaml" 2>/dev/null
-    find "$PLUGIN_DIR/src" -type f -name '*.ts' -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+    find "$PLUGIN_DIR/src" "$PLUGIN_DIR/bin" -type f -name '*.ts' -print0 2>/dev/null \
+      | sort -z | xargs -0 cat 2>/dev/null
   } | shasum -a 256 | cut -d' ' -f1
 }
 
@@ -44,9 +47,12 @@ fi
 
 cd "$PLUGIN_DIR"
 pnpm install --frozen-lockfile --ignore-scripts >/dev/null 2>&1 || true
-pnpm build >/dev/null 2>&1 || true
 
-if [[ -f "$DIST_ENTRY" ]]; then
+# Stamp only on a build that actually succeeded. A pre-existing dist/ from a prior successful
+# build satisfies the -f check below regardless of whether *this* build worked — writing the
+# stamp unconditionally would silently lock in that stale artifact forever the next time the
+# hash changes and the build fails again, which is the exact bug this script exists to fix.
+if pnpm build >/dev/null 2>&1 && [[ -f "$DIST_ENTRY" ]]; then
   current_hash > "$STAMP_FILE"
 fi
 
