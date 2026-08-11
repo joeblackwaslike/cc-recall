@@ -21,9 +21,15 @@ spawn_rate_count() {
   local since; since="$(date -u -v-"${SPAWN_RATE_WINDOW_SECS}"S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
     || date -u -d "-${SPAWN_RATE_WINDOW_SECS} seconds" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
   [ -n "${since:-}" ] || { echo 0; return; }
-  "$JQ" -cs --arg since "$since" \
-    '[.[] | select(.kind=="enrichment_spawn" and .ts >= $since)] | length' \
-    "$CC_RECALL_ADOPTION_FILE" 2>/dev/null || echo 0
+  # Read line-by-line (`-R`) and skip anything that doesn't parse, matching readEvents()'s
+  # per-line try/catch in adoption.ts. A single slurp (`jq -s`) parses the whole file as one
+  # value: one malformed line (e.g. a torn write) fails the entire parse and, via the `|| echo
+  # 0` fallback, silently reports a *healthy* zero rate at exactly the moment the watchdog
+  # exists to catch a problem.
+  "$JQ" -Rc --arg since "$since" '
+    try fromjson catch empty
+    | select(.kind=="enrichment_spawn" and .ts >= $since)
+  ' "$CC_RECALL_ADOPTION_FILE" 2>/dev/null | wc -l | tr -d ' '
 }
 
 sidecar_size_mb() {

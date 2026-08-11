@@ -7,12 +7,12 @@
   <string>com.ccrecall.watchdog-light</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/joe/github/joeblackwaslike/cc-recall/ops/cc-recall-watchdog/bin/watchdog-light.sh</string>
+    <string>__OPS_DIR__/bin/watchdog-light.sh</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>/Users/joe</string>
+    <string>__HOME__</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>

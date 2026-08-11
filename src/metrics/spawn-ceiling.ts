@@ -50,9 +50,14 @@ export interface SpawnGateResult {
  * Check the rolling-window spawn ceiling. If there's room, records this spawn immediately and
  * allows it; Node is single-threaded with no `await` between the count and the log below, so
  * two enrichment attempts in the same process cannot both slip past a ceiling that's already
- * been reached. Separate `cc-recall` processes (e.g. two hook-triggered CLI invocations) are
- * not synchronized against each other — acceptable for a coarse per-hour ceiling, not a
- * precise limiter.
+ * been reached. Separate `cc-recall` processes (e.g. two hook-triggered CLI invocations racing
+ * on the same rolling window) are NOT synchronized against each other: each reads the file
+ * independently before either appends, so in the worst case a concurrent hook storm — the
+ * literal shape of Incident B, two SessionEnd-triggered CLI processes firing seconds apart —
+ * can admit up to 2x the configured ceiling before either process observes the other's spawn.
+ * Acceptable for a coarse per-hour ceiling meant to bound sustained runaway spend, not a precise
+ * limiter; ops/cc-recall-watchdog's independent spawn-rate check is the backstop if this window
+ * is ever exploited at scale.
  */
 export const admitEnrichmentSpawn = (now: number = Date.now()): SpawnGateResult => {
   const ceiling = spawnCeiling();

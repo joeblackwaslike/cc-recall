@@ -53,7 +53,7 @@ watchdog keeps working even if the in-process code is stale or never ran.
     CC_RECALL_SIDECAR_DB=/tmp/wd-test/index.db bash bin/watchdog-light.sh
   ```
 - `install.sh` installs only the launchd job. `uninstall.sh` removes it. Neither touches
-  OpenClaw or requires it — `notify()` degrades to a warned no-op if the gateway isn't
+  OpenClaw nor requires it — `notify()` degrades to a warned no-op if the gateway isn't
   configured, same as claude-mem-watchdog.
 
 ## Origin

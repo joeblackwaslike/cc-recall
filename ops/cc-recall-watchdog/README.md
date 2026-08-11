@@ -26,7 +26,7 @@ stale/bypassed/missing gate is still visible.
 | `bin/watchdog-light.sh` | ~5 min: enrichment spawn-rate check, sidecar growth check |
 | `bin/lib.sh` | shared: logging, incident log, circuit breaker, notify, request lifecycle — ported from `ops/watchdog/bin/lib.sh` (claude-mem-watchdog), not reinvented |
 | `etc/watchdog.conf` | all thresholds and paths |
-| `launchd/com.ccrecall.watchdog-light.plist` | the scheduled job |
+| `launchd/com.ccrecall.watchdog-light.plist` | the scheduled job (a template — `install.sh` renders `__OPS_DIR__`/`__HOME__` before installing) |
 
 ## What it checks
 

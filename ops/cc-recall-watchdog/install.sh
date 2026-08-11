@@ -20,7 +20,10 @@ mkdir -p "$HOME/.cc-recall-watchdog/"{pending,decisions,logs}
 
 echo "==> (re)load launchd unit"
 mkdir -p "$LA"
-ln -sfn "$OPS_DIR/launchd/$LABEL.plist" "$LA/$LABEL.plist"
+# Render, not symlink: the checked-in plist is a template (__OPS_DIR__/__HOME__ placeholders) so
+# it stays portable across machines and clone locations instead of baking in this one's paths.
+sed -e "s|__OPS_DIR__|$OPS_DIR|g" -e "s|__HOME__|$HOME|g" \
+  "$OPS_DIR/launchd/$LABEL.plist" >"$LA/$LABEL.plist"
 launchctl bootout  "gui/$UID_NUM/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$UID_NUM" "$LA/$LABEL.plist"
 launchctl enable   "gui/$UID_NUM/$LABEL"
