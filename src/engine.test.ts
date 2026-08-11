@@ -8,11 +8,12 @@ import { type Sidecar, openSidecar } from './surfaces/sidecar.js';
 
 const PROJECT_DIR = '-Users-joe-proj';
 const SESSION = 's-e';
+const CWD = '/Users/joe/proj';
 
 const transcript = `${JSON.stringify({
   type: 'user',
   sessionId: SESSION,
-  cwd: '/Users/joe/proj',
+  cwd: CWD,
   timestamp: '2026-01-01T00:00:00.000Z',
   message: { role: 'user', content: [{ type: 'text', text: 'wire up the engine' }] },
 })}\n`;
@@ -33,7 +34,7 @@ const appendMidSynthesis = (file: string): Promise<string> => {
     `${transcript.trimEnd()}\n${JSON.stringify({
       type: 'user',
       sessionId: SESSION,
-      cwd: '/Users/joe/proj',
+      cwd: CWD,
       timestamp: '2026-01-02T00:00:00.000Z',
       message: { role: 'user', content: [{ type: 'text', text: 'appended mid-synthesis' }] },
     })}\n`,
@@ -114,5 +115,233 @@ describe('engine', () => {
     const second = await backfill(sidecar, { projectsRoot: root, baseDir, llm: false });
     expect(second.skipped).toBe(1);
     expect(second.written).toBe(0);
+  });
+});
+
+const THREE = 3;
+const SIX = 6;
+const EIGHT = 8;
+const TEN = 10;
+const TWO = 2;
+
+const seedBatch = (dir: string, count: number): void => {
+  for (let index = 0; index < count; index += 1) {
+    const id = `s-batch-${index}`;
+    writeFileSync(
+      path.join(dir, `${id}.jsonl`),
+      `${JSON.stringify({
+        type: 'user',
+        sessionId: id,
+        cwd: CWD,
+        timestamp: '2026-01-01T00:00:00.000Z',
+        message: { role: 'user', content: [{ type: 'text', text: `session ${index}` }] },
+      })}\n`,
+    );
+  }
+};
+
+/**
+ * Seeds two sessions and runs one backfill pass where the first enriches and the second degrades
+ * (LLM rejects). Shared setup for the --only-heuristic repair tests below.
+ */
+const seedOneEnrichedOneDegraded = async (
+  sidecar: Sidecar,
+  projectDir: string,
+  root: string,
+  baseDir: string,
+): Promise<void> => {
+  seedBatch(projectDir, TWO);
+  let call = 0;
+  await backfill(sidecar, {
+    projectsRoot: root,
+    baseDir,
+    skipClaudeMem: true,
+    llm: () => {
+      call += 1;
+      return call === 1 ? Promise.resolve(STUB_ENRICHMENT) : Promise.reject(new Error('down'));
+    },
+  });
+};
+
+/**
+ * Enrichment failure is deliberately not an error — one degraded record beats a failed run. The
+ * hazard is that nothing throws, `failed` stays 0, and a run that lost the LLM entirely reports a
+ * clean sweep. It also gets there sooner than a healthy run, because a failing call returns in
+ * milliseconds where a successful one takes seconds.
+ */
+describe('engine — LLM degradation is visible and bounded', () => {
+  let root: string;
+  let baseDir: string;
+  let projectDir: string;
+  let sidecar: Sidecar;
+
+  beforeEach(() => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-deg-'));
+    root = path.join(tmp, 'projects');
+    baseDir = path.join(tmp, 'base');
+    projectDir = path.join(root, PROJECT_DIR);
+    mkdirSync(projectDir, { recursive: true });
+    sidecar = openSidecar(':memory:');
+  });
+  afterEach(() => {
+    sidecar.close();
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  it('counts heuristic fallbacks separately from writes', async () => {
+    seedBatch(projectDir, THREE);
+    const summary = await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      llm: () => Promise.reject(new Error('429 rate limited')),
+    });
+    // Every record still lands — that is the intended degradation. What must not happen is the
+    // summary being indistinguishable from a healthy run.
+    expect(summary.written).toBe(THREE);
+    expect(summary.failed).toBe(0);
+    expect(summary.degraded).toBe(THREE);
+    expect(summary.enriched).toBe(0);
+  });
+
+  it('aborts once LLM failures are consecutive and systematic', async () => {
+    seedBatch(projectDir, TEN);
+    const summary = await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      maxConsecutiveLlmFailures: THREE,
+      llm: () => Promise.reject(new Error('worker down')),
+    });
+    expect(summary.abortedReason).toMatch(/consecutive LLM failures/);
+    expect(summary.processed).toBeLessThan(summary.total);
+  });
+
+  it('does not abort when failures are intermittent rather than systematic', async () => {
+    seedBatch(projectDir, SIX);
+    let calls = 0;
+    const summary = await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      maxConsecutiveLlmFailures: THREE,
+      llm: () => {
+        calls += 1;
+        return calls % TWO === 0
+          ? Promise.reject(new Error('flaky'))
+          : Promise.resolve(STUB_ENRICHMENT);
+      },
+    });
+    // A success resets the counter, so alternating failures must never trip the breaker.
+    expect(summary.abortedReason).toBeUndefined();
+    expect(summary.processed).toBe(summary.total);
+    expect(summary.enriched).toBeGreaterThan(0);
+    expect(summary.degraded).toBeGreaterThan(0);
+  });
+
+  it('stops at the LLM call ceiling even with files remaining', async () => {
+    seedBatch(projectDir, EIGHT);
+    const summary = await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      maxLlmCalls: TWO,
+      llm: () => Promise.resolve(STUB_ENRICHMENT),
+    });
+    expect(summary.abortedReason).toMatch(/max-llm-calls/);
+    expect(summary.processed).toBeLessThan(summary.total);
+  });
+});
+
+describe('engine — heuristic records are identifiable and repairable', () => {
+  let root: string;
+  let baseDir: string;
+  let projectDir: string;
+  let sidecar: Sidecar;
+
+  beforeEach(() => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-rep-'));
+    root = path.join(tmp, 'projects');
+    baseDir = path.join(tmp, 'base');
+    projectDir = path.join(root, PROJECT_DIR);
+    mkdirSync(projectDir, { recursive: true });
+    sidecar = openSidecar(':memory:');
+  });
+  afterEach(() => {
+    sidecar.close();
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  it('stamps a failed LLM pass as heuristic, with the reason', async () => {
+    seedBatch(projectDir, 1);
+    await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      llm: () => Promise.reject(new Error('429 rate limited')),
+    });
+    const stored = sidecar.get('s-batch-0');
+    expect(stored?.enrichment).toBe('heuristic');
+    expect(stored?.enrichment_error).toMatch(/429/);
+  });
+
+  it('stamps a successful LLM pass as llm', async () => {
+    seedBatch(projectDir, 1);
+    await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      llm: () => Promise.resolve(STUB_ENRICHMENT),
+    });
+    const stored = sidecar.get('s-batch-0');
+    expect(stored?.enrichment).toBe('llm');
+    expect(stored?.enrichment_error).toBeUndefined();
+  });
+
+  it('--only-heuristic re-synthesizes the degraded and leaves the enriched alone', async () => {
+    await seedOneEnrichedOneDegraded(sidecar, projectDir, root, baseDir);
+
+    // Repair pass with force, so the hash check does not skip everything.
+    let repairCalls = 0;
+    const repair = await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      force: true,
+      onlyHeuristic: true,
+      llm: () => {
+        repairCalls += 1;
+        return Promise.resolve(STUB_ENRICHMENT);
+      },
+    });
+
+    // The whole point: one LLM call, not two. The already-enriched session is skipped before
+    // synthesis rather than after.
+    expect(repairCalls).toBe(1);
+    expect(repair.skipped).toBe(1);
+    expect(sidecar.get('s-batch-1')?.enrichment).toBe('llm');
+  });
+
+  it('--only-heuristic alone repairs a degraded session, without also requiring --force', async () => {
+    // The advertised repair command is `--only-heuristic`, not `--only-heuristic --force`. A
+    // degraded record's transcript is typically unchanged since it was last indexed -- that's
+    // the normal repair scenario -- so if onlyHeuristic doesn't bypass the unchanged-hash skip on
+    // its own, the command silently does nothing for the exact case it exists to fix.
+    await seedOneEnrichedOneDegraded(sidecar, projectDir, root, baseDir);
+
+    let repairCalls = 0;
+    await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      onlyHeuristic: true,
+      llm: () => {
+        repairCalls += 1;
+        return Promise.resolve(STUB_ENRICHMENT);
+      },
+    });
+
+    expect(repairCalls).toBe(1);
+    expect(sidecar.get('s-batch-1')?.enrichment).toBe('llm');
   });
 });

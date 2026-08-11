@@ -352,6 +352,16 @@ export interface SynthesizeOptions {
   llm?: LlmRunner | false;
   /** Called with a message when the LLM pass fails and the heuristic is used instead. */
   onWarn?: (message: string) => void;
+  /**
+   * Called with the outcome of the LLM pass, when one was attempted.
+   *
+   * Falling back to the heuristic is deliberately not an error — one degraded record is better
+   * than a failed run. But the caller cannot see the difference from the returned record, and a
+   * batch caller must: a failing call returns in milliseconds where a successful one takes ~15s,
+   * so a rate-limit storm makes a backfill finish *faster* while producing a fully degraded
+   * index, and report complete success while doing it.
+   */
+  onLlmOutcome?: (outcome: { ok: boolean; error?: string }) => void;
 }
 
 /** Synthesize a record: heuristic baseline enriched by the LLM, with graceful fallback. */
@@ -361,14 +371,21 @@ export const synthesize = async (
 ): Promise<RecallRecord> => {
   const base = synthesizeHeuristic(input);
   const runner = options.llm === false ? undefined : (options.llm ?? runClaudeHeadless);
-  if (!runner) return base;
+  // Heuristic by choice rather than by failure — no error to record, but still marked, because
+  // `--only-heuristic` should pick these up too: they are equally worth enriching later.
+  if (!runner) return { ...base, enrichment: 'heuristic' };
   try {
     const raw = await runner(buildLlmPrompt(input.parsed));
     const enrichment = llmEnrichmentSchema.parse(extractJson(raw));
-    return applyEnrichment(base, enrichment);
+    options.onLlmOutcome?.({ ok: true });
+    return { ...applyEnrichment(base, enrichment), enrichment: 'llm' };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     options.onWarn?.(`LLM synthesis failed, using heuristic: ${message}`);
-    return base;
+    options.onLlmOutcome?.({ ok: false, error: message });
+    // Stamp the fallback so it is findable later. A degraded record that cannot be identified
+    // can only be repaired by re-running everything, which is how a 8,673-session problem
+    // became a 56,037-call one.
+    return { ...base, enrichment: 'heuristic', enrichment_error: message };
   }
 };

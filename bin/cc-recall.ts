@@ -61,6 +61,8 @@ interface BackfillCliOptions extends DbOptions {
   limit?: string;
   dryRun?: boolean;
   force?: boolean;
+  maxLlmCalls?: string;
+  onlyHeuristic?: boolean;
 }
 interface MigrateCliOptions {
   from: string;
@@ -104,6 +106,8 @@ const backfillOptionsFrom = (cli: BackfillCliOptions): BackfillOptions => {
   if (!cli.llm) options.llm = false;
   if (cli.scope) options.scope = cli.scope;
   if (cli.limit) options.limit = Number(cli.limit);
+  if (cli.maxLlmCalls) options.maxLlmCalls = Number(cli.maxLlmCalls);
+  if (cli.onlyHeuristic) options.onlyHeuristic = true;
   return options;
 };
 
@@ -134,6 +138,16 @@ const runBackfill = async (cli: BackfillCliOptions): Promise<void> => {
     out(
       `backfill: ${summary.processed}/${summary.total} processed, ${summary.written} written, ${summary.skipped} skipped, ${summary.failed} failed`,
     );
+    // Enrichment quality is reported separately from success. A run where every LLM call failed
+    // still writes every record — from these two numbers alone it was indistinguishable from a
+    // healthy run, and it finished sooner.
+    if (summary.enriched > 0 || summary.degraded > 0) {
+      out(`  enrichment: ${summary.enriched} enriched, ${summary.degraded} fell back to heuristic`);
+    }
+    if (summary.abortedReason !== undefined) {
+      process.exitCode = 1;
+      err(`backfill stopped early — ${summary.abortedReason}. The corpus is only partly indexed.`);
+    }
   } finally {
     sidecar.close();
   }
@@ -213,8 +227,29 @@ const reportSidecar = (db: string): void => {
   }
 };
 
+const MIB = 1_048_576;
+
+/** Reclaim SQLite free pages. Never fatal — doctor reports health, it does not gate on cleanup. */
+const compactSidecar = (db: string): void => {
+  const sidecar = openSidecar(db);
+  try {
+    const { before, after } = sidecar.vacuum();
+    const saved = before - after;
+    out(
+      saved > 0
+        ? `vacuum: reclaimed ${(saved / MIB).toFixed(1)}MB (${(before / MIB).toFixed(1)} → ${(after / MIB).toFixed(1)}MB)`
+        : `vacuum: nothing to reclaim (${(after / MIB).toFixed(1)}MB)`,
+    );
+  } catch (error) {
+    err(`vacuum: skipped — ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    sidecar.close();
+  }
+};
+
 const runDoctor = async (options: { db: string }): Promise<void> => {
   reportSidecar(options.db);
+  compactSidecar(options.db);
   // G0 (spec §12): claude-mem must pass before surface ③ is enabled.
   const g0 = await verifyClaudeMemG0();
   out(
@@ -263,6 +298,8 @@ program
   .option(BASE_FLAG, BASE_DESC, baseDirDefault())
   .option('--scope <substring>', 'only project dirs containing this substring')
   .option('--limit <n>', 'stop after N transcripts')
+  .option('--max-llm-calls <n>', 'hard ceiling on LLM calls (--limit caps files, not spend)')
+  .option('--only-heuristic', 're-synthesize only sessions whose record is not LLM-enriched')
   .option(NO_LLM_FLAG, NO_LLM_DESC)
   .option('--dry-run', DRY_RUN_DESC)
   .option('--force', FORCE_DESC)
@@ -339,6 +376,21 @@ program
       out('  verdict: hit rate below 80% — consider a dedicated find-session tool');
     }
   });
+
+// The try below only covers rejections that propagate through the awaited parseAsync. A promise
+// that settles late or was never awaited — a detached handle, a fire-and-forget write — escapes
+// it entirely, and Node's default is to print a raw stack dump and abort. Under the SessionEnd
+// hook that process is already detached, so the abort is invisible: the run simply stops, and
+// session-end.log gets a V8 dump with no indication of which transcript caused it.
+//
+// This does not swallow the failure. The exit stays non-zero; it only makes the reason
+// attributable, which is the difference between a diagnosable log line and 13,052 mystery entries.
+process.on('unhandledRejection', (reason) => {
+  err(
+    `cc-recall: unhandled rejection — ${reason instanceof Error ? reason.stack : String(reason)}`,
+  );
+  process.exitCode = 1;
+});
 
 // A rejection here would otherwise surface as a raw V8 stack dump and a non-zero exit with no
 // actionable message — the failure mode that made the ENOENT crashes so hard to attribute.

@@ -62,6 +62,21 @@ export const recallRecordSchema = z.object({
     asked_about: stringArraySchema,
   }),
   provenance: z.enum(['forward', 'backfill', 'manual']),
+  /**
+   * How this record's content was produced. `provenance` says which pipeline ran; this says
+   * whether the LLM pass inside it succeeded.
+   *
+   * Without it a heuristic fallback is byte-identical in shape to a real enrichment, so 8,673
+   * sessions ended up with a title that is just a truncated first prompt — the exact low-quality
+   * state this project exists to remove — and nothing could find them. The only repair was
+   * re-running the whole corpus. Recording it turns that into a query.
+   *
+   * Optional so records written before this field parse unchanged; absent means unknown, not
+   * enriched, and `--only-heuristic` deliberately treats it as a candidate.
+   */
+  enrichment: z.enum(['llm', 'heuristic']).optional(),
+  /** Why the LLM pass fell back, when it did. Diagnostic only. */
+  enrichment_error: z.string().optional(),
   generated_at: z.string(),
   synthesizer_version: z.string(),
 });

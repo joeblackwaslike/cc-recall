@@ -103,6 +103,16 @@ export interface WriteOptions {
    */
   expectedSourceHash?: string;
   /**
+   * Rewrite even when the transcript already carries a record for this exact source hash.
+   *
+   * The engine has its own `force` that bypasses the *sidecar* hash check so synthesis re-runs.
+   * Without this flag the writer's independent idempotency check still short-circuits, so
+   * `backfill --force` paid for one LLM call per transcript and then wrote none of them,
+   * reporting "0 written, N skipped". A command that reports "skipped" after spending a full
+   * quota is the worst possible framing of that outcome.
+   */
+  force?: boolean;
+  /**
    * Called when an operation declines to act for a reason the caller would otherwise be unable
    * to distinguish from an ordinary no-op — currently the revert path bailing on a concurrent
    * modification, which returns the same `false` as "no record found".
@@ -370,7 +380,7 @@ export const writeRecordToTranscript = (
   const { kept, hadRecallRecord, markerHash } = classify(original);
   const sourceHash = sha256(kept.join('\n'));
 
-  if (hadRecallRecord && markerHash === sourceHash) {
+  if (!options.force && hadRecallRecord && markerHash === sourceHash) {
     return { written: false, skipped: true, skipReason: 'unchanged', sourceHash, backupPath };
   }
 
