@@ -12,6 +12,7 @@ export default defineConfig({
     environment: 'node',
     pool: 'forks',
     testTimeout: 30_000,
+    setupFiles: ['./vitest.setup.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov', 'html'],

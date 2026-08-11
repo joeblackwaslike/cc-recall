@@ -8,7 +8,15 @@
 // The convergence test at the bottom is the one that pins the bug class; the rest check the
 // mechanics that produce it.
 
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -247,6 +255,26 @@ describe('corpus exclusion and convergence', () => {
     expect(wasCalled).toBe(false);
   });
 
+  // The hook-triggered path (SessionEnd forward capture): the hook hands indexSession the
+  // transcript path directly, straight from an enrichment subprocess's own dedicated cwd. It
+  // never goes through listTranscripts' directory-level exclusion (that only protects the
+  // backfill scan above), so only isIndexerTranscript's content check protects this path from
+  // re-triggering the LLM — this is the mechanism Phase 1 confirmed for Incident B.
+  it('skips a transcript inside the indexer project dir when indexed directly (hook forward-capture path)', async () => {
+    const file = writeTranscript(INDEXER_PROJECT_DIR, 'own-run', INDEXER_PROMPT);
+    let wasCalled = false;
+    const result = await indexSession(file, sidecar, {
+      baseDir,
+      llm: () => {
+        wasCalled = true;
+        return Promise.resolve(ENRICHMENT_JSON);
+      },
+    });
+    expect(wasCalled).toBe(false);
+    expect(result.skipped).toBe(true);
+    expect(result.written).toBe(false);
+  });
+
   // The invariant the original defect violated: every enrichment run wrote a transcript back
   // into the corpus, so the queue grew as fast as it drained and backfill never terminated.
   it('reaches a fixed point — enrichment output does not become new work', async () => {
@@ -271,5 +299,138 @@ describe('corpus exclusion and convergence', () => {
     // Assert it was actively skipped and nothing failed, so the test stays diagnostic.
     expect(second.failed).toBe(0);
     expect(second.skipped).toBe(2); // the pre-existing real session, plus the stray enrichment run
+  });
+});
+
+// A hard ceiling enforced BEFORE spawning, not just cleanup after: covers both the hook path
+// (one `synthesize` call per hook-triggered CLI invocation) and backfill (many calls in one
+// process) since both funnel through the same `synthesize` gate.
+describe('spawn-rate ceiling', () => {
+  let metricsRoot: string;
+
+  beforeEach(() => {
+    metricsRoot = mkdtempSync(path.join(tmpdir(), 'cc-recall-spawn-'));
+    vi.stubEnv('CC_RECALL_METRICS_DIR', metricsRoot);
+    vi.stubEnv('CC_RECALL_SPAWN_CEILING', '1');
+    vi.stubEnv('CC_RECALL_SPAWN_WINDOW_MS', String(ONE_HOUR_MS));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(metricsRoot, { recursive: true, force: true });
+  });
+
+  it('pauses to heuristic-only once the rolling-window spawn ceiling is reached, and logs an incident', async () => {
+    const parsedFirst = parseTranscriptText(
+      transcriptOf('gate-1', 'first ask'),
+      '/repo/gate-1.jsonl',
+    );
+    const parsedSecond = parseTranscriptText(
+      transcriptOf('gate-2', 'second ask'),
+      '/repo/gate-2.jsonl',
+    );
+    let calls = 0;
+    const llm = (): Promise<string> => {
+      calls += 1;
+      return Promise.resolve(ENRICHMENT_JSON);
+    };
+
+    const first = await synthesize(
+      { parsed: parsedFirst, project: 'proj', provenance: 'backfill' },
+      { llm },
+    );
+    expect(calls).toBe(1);
+    expect(first.title).toBe('stub'); // enrichment applied
+    expect(first.enrichment).toBe('llm');
+
+    const warnings: string[] = [];
+    const outcomes: { ok: boolean; error?: string }[] = [];
+    const second = await synthesize(
+      { parsed: parsedSecond, project: 'proj', provenance: 'backfill' },
+      {
+        llm,
+        onWarn: (message) => {
+          warnings.push(message);
+        },
+        onLlmOutcome: (outcome) => {
+          outcomes.push(outcome);
+        },
+      },
+    );
+    // Ceiling of 1/window was already spent by the first call — the LLM must not run again.
+    expect(calls).toBe(1);
+    expect(second.title).toBe('second ask'); // heuristic fallback, not the enrichment stub
+    expect(second.enrichment).toBe('heuristic');
+    expect(second.enrichment_error).toMatch(/spawn-rate ceiling/);
+    expect(warnings.some((message) => message.includes('spawn-rate ceiling'))).toBe(true);
+    // Reported through the same onLlmOutcome channel as a real LLM failure — not the deliberate
+    // `llm: false` case — so a sustained block trips backfill's own consecutive-failure breaker
+    // instead of silently degrading the rest of the corpus at full LLM cost.
+    expect(outcomes).toEqual([{ ok: false, error: second.enrichment_error }]);
+
+    const incidentsFile = path.join(metricsRoot, 'incidents.jsonl');
+    expect(existsSync(incidentsFile)).toBe(true);
+    expect(readFileSync(incidentsFile, 'utf8')).toContain('spawn_ceiling_paused');
+  });
+
+  it('does not spend the ceiling when the LLM is disabled (llm: false)', async () => {
+    const parsed = parseTranscriptText(transcriptOf('no-llm', 'ask'), '/repo/no-llm.jsonl');
+    const record = await synthesize(
+      { parsed, project: 'proj', provenance: 'backfill' },
+      { llm: false },
+    );
+    expect(record.title).toBe('ask');
+    expect(record.enrichment).toBe('heuristic');
+    expect(record.enrichment_error).toBeUndefined();
+    expect(existsSync(path.join(metricsRoot, 'adoption.jsonl'))).toBe(false);
+    expect(existsSync(path.join(metricsRoot, 'incidents.jsonl'))).toBe(false);
+  });
+});
+
+describe('spawn-rate ceiling — metrics I/O failure', () => {
+  let metricsRoot: string;
+
+  beforeEach(() => {
+    metricsRoot = mkdtempSync(path.join(tmpdir(), 'cc-recall-spawn-'));
+    vi.stubEnv('CC_RECALL_SPAWN_CEILING', '1');
+    vi.stubEnv('CC_RECALL_SPAWN_WINDOW_MS', String(ONE_HOUR_MS));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(metricsRoot, { recursive: true, force: true });
+  });
+
+  // If the ceiling can't durably record a spawn (disk trouble, permissions), admitting it
+  // anyway would run uncounted and silently defeat the ceiling forever after. Fails closed
+  // instead: same graceful degradation as any other enrichment failure, never a crash.
+  it('falls back to heuristic, without crashing or invoking the LLM, when the metrics dir cannot be created', async () => {
+    const blockedDir = path.join(metricsRoot, 'blocking-file', 'metrics');
+    writeFileSync(path.join(metricsRoot, 'blocking-file'), 'not a directory');
+    vi.stubEnv('CC_RECALL_METRICS_DIR', blockedDir);
+
+    const parsed = parseTranscriptText(transcriptOf('io-fail', 'ask'), '/repo/io-fail.jsonl');
+    let wasCalled = false;
+    const warnings: string[] = [];
+    const record = await synthesize(
+      { parsed, project: 'proj', provenance: 'backfill' },
+      {
+        llm: () => {
+          wasCalled = true;
+          return Promise.resolve(ENRICHMENT_JSON);
+        },
+        onWarn: (message) => {
+          warnings.push(message);
+        },
+      },
+    );
+    expect(wasCalled).toBe(false);
+    expect(record.title).toBe('ask');
+    expect(record.enrichment).toBe('heuristic');
+    // Not the "ceiling exceeded N/M" message -- nothing was actually counted or compared, the
+    // write just failed. A borrowed ceiling-exceeded message here would misleadingly claim a
+    // definitive count (e.g. "0/1") for a decision that was never based on one.
+    expect(record.enrichment_error).toMatch(/could not read the spawn-rate ceiling metrics/);
+    expect(warnings).toEqual([record.enrichment_error]);
   });
 });

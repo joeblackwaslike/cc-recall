@@ -2,8 +2,18 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-const METRICS_DIR = path.join(homedir(), '.claude', 'cc-recall', 'metrics');
-const METRICS_FILE = path.join(METRICS_DIR, 'adoption.jsonl');
+/**
+ * Resolved per call, like `indexerModel()` in synthesizer.ts, so a test can point it at a
+ * scratch dir via `CC_RECALL_METRICS_DIR` without a module reload.
+ */
+export const metricsDir = (): string => {
+  const override = process.env.CC_RECALL_METRICS_DIR;
+  return typeof override === 'string' && override.trim() !== ''
+    ? override
+    : path.join(homedir(), '.claude', 'cc-recall', 'metrics');
+};
+
+const metricsFile = (): string => path.join(metricsDir(), 'adoption.jsonl');
 
 interface IntentEvent {
   kind: 'intent';
@@ -17,22 +27,35 @@ interface SearchEvent {
   resultCount: number;
 }
 
-type AdoptionEvent = IntentEvent | SearchEvent;
+/** One enrichment subprocess spawn, logged before it starts (spec Phase 3 spawn-rate ceiling). */
+export interface EnrichmentSpawnEvent {
+  kind: 'enrichment_spawn';
+  ts: string;
+}
+
+type AdoptionEvent = IntentEvent | SearchEvent | EnrichmentSpawnEvent;
 
 const ensureDir = (): void => {
-  if (!existsSync(METRICS_DIR)) mkdirSync(METRICS_DIR, { recursive: true });
+  const dir = metricsDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+};
+
+const appendEvent = (event: AdoptionEvent): void => {
+  ensureDir();
+  appendFileSync(metricsFile(), `${JSON.stringify(event)}\n`);
 };
 
 export const logIntentDetection = (pattern: string): void => {
-  ensureDir();
-  const event: IntentEvent = { kind: 'intent', ts: new Date().toISOString(), pattern };
-  appendFileSync(METRICS_FILE, `${JSON.stringify(event)}\n`);
+  appendEvent({ kind: 'intent', ts: new Date().toISOString(), pattern });
 };
 
 export const logSearchQuery = (resultCount: number): void => {
-  ensureDir();
-  const event: SearchEvent = { kind: 'search', ts: new Date().toISOString(), resultCount };
-  appendFileSync(METRICS_FILE, `${JSON.stringify(event)}\n`);
+  appendEvent({ kind: 'search', ts: new Date().toISOString(), resultCount });
+};
+
+/** Record an enrichment-subprocess spawn attempt, for the rolling-hour rate ceiling. */
+export const logEnrichmentSpawn = (): void => {
+  appendEvent({ kind: 'enrichment_spawn', ts: new Date().toISOString() });
 };
 
 export interface AdoptionReport {
@@ -50,8 +73,38 @@ export interface AdoptionReport {
 
 const MS_PER_DAY = 86_400_000;
 
+const readEvents = (): AdoptionEvent[] => {
+  const file = metricsFile();
+  if (!existsSync(file)) return [];
+  const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  const events: AdoptionEvent[] = [];
+  for (const line of lines) {
+    try {
+      events.push(JSON.parse(line) as AdoptionEvent);
+    } catch {
+      /* skip malformed lines */
+    }
+  }
+  return events;
+};
+
+/** Count `enrichment_spawn` events timestamped within the trailing `windowMs` ending at `now`. */
+export const countRecentEnrichmentSpawns = (windowMs: number, now: number = Date.now()): number => {
+  const since = now - windowMs;
+  return readEvents().filter((event): event is EnrichmentSpawnEvent => {
+    if (event.kind !== 'enrichment_spawn') return false;
+    const ts = Date.parse(event.ts);
+    // Excludes future-dated timestamps (clock skew, a corrupted write) as well as past-window
+    // ones. Without the upper bound, a single future-dated event counts as "recent" forever --
+    // not just until it naturally ages out -- permanently inflating the rolling count until
+    // someone notices and hand-edits the file.
+    return ts >= since && ts <= now;
+  }).length;
+};
+
 export const readAdoptionMetrics = (): AdoptionReport => {
-  if (!existsSync(METRICS_FILE)) {
+  const events = readEvents();
+  if (events.length === 0) {
     return {
       totalIntents: 0,
       totalSearches: 0,
@@ -64,16 +117,6 @@ export const readAdoptionMetrics = (): AdoptionReport => {
       intentsPerDay: 0,
       searchesPerDay: 0,
     };
-  }
-
-  const lines = readFileSync(METRICS_FILE, 'utf8').split('\n').filter(Boolean);
-  const events: AdoptionEvent[] = [];
-  for (const line of lines) {
-    try {
-      events.push(JSON.parse(line) as AdoptionEvent);
-    } catch {
-      /* skip malformed lines */
-    }
   }
 
   const intents = events.filter((event): event is IntentEvent => event.kind === 'intent');

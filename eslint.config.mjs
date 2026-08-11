@@ -136,9 +136,10 @@ export default tseslint.config(
       'node_modules/**',
       'dist/**',
       'coverage/**',
-      'ops/**', // unrelated claude-mem watchdog — not part of cc-recall
+      'ops/**', // watchdog scripts (bash) — not part of the cc-recall TS project
       '*.config.mjs',
       'vitest.config.ts',
+      'vitest.setup.ts',
     ],
   },
 );

@@ -13,6 +13,7 @@ import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
+import { admitEnrichmentSpawn } from '../metrics/spawn-ceiling.js';
 import type { ParsedTranscript } from '../transcript/parse.js';
 import {
   type AssistantRecord,
@@ -37,6 +38,7 @@ const TITLE_MAX = 80;
 const SUMMARY_MAX = 600;
 const HANDOFF_MIN_LEN = 200;
 export const LLM_TIMEOUT_MS = 60_000;
+const MS_PER_MINUTE = 60_000;
 const MAX_DIGEST_PROMPTS = 12;
 const PROMPT_SNIPPET = 500;
 const MAX_DIGEST_COMPLETIONS = 4;
@@ -374,6 +376,26 @@ export const synthesize = async (
   // Heuristic by choice rather than by failure — no error to record, but still marked, because
   // `--only-heuristic` should pick these up too: they are equally worth enriching later.
   if (!runner) return { ...base, enrichment: 'heuristic' };
+
+  // Hard ceiling enforced BEFORE spawning, not just cleanup after: the single funnel both the
+  // hook-triggered forward-capture path and backfill share, so gating here covers both without
+  // duplicating the check per caller. Reported through onLlmOutcome/enrichment_error the same as
+  // a real LLM failure (not the deliberate `!runner` case above) so it flows through the same
+  // tracking: `--only-heuristic` repair picks these records up, and a sustained block trips
+  // backfill's own maxConsecutiveLlmFailures breaker instead of silently burning through the
+  // rest of the corpus at heuristic quality.
+  const gate = admitEnrichmentSpawn();
+  if (!gate.allowed) {
+    const message =
+      gate.count === undefined
+        ? 'enrichment paused: could not read the spawn-rate ceiling metrics; using heuristic'
+        : `enrichment paused: spawn-rate ceiling exceeded (${gate.count}/${gate.ceiling} per ` +
+          `${Math.round(gate.windowMs / MS_PER_MINUTE)}min window); using heuristic`;
+    options.onWarn?.(message);
+    options.onLlmOutcome?.({ ok: false, error: message });
+    return { ...base, enrichment: 'heuristic', enrichment_error: message };
+  }
+
   try {
     const raw = await runner(buildLlmPrompt(input.parsed));
     const enrichment = llmEnrichmentSchema.parse(extractJson(raw));
