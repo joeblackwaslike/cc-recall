@@ -87,7 +87,10 @@ current_hash() {
 }
 
 if [[ -f "$ENTRYPOINT" && -f "$STAMP_FILE" ]]; then
-  if [[ "$(cat "$STAMP_FILE" 2>/dev/null)" == "$(current_hash 2>/dev/null)" ]]; then
+  # Not `current_hash 2>/dev/null` here: that would swallow current_hash's own "shasum not found"
+  # diagnostic exactly where it matters most -- the fast path every normal run takes. It's a no-op
+  # on the working-shasum case (current_hash never writes to stderr when it succeeds).
+  if [[ "$(cat "$STAMP_FILE" 2>/dev/null)" == "$(current_hash)" ]]; then
     respond_and_exit
   fi
 fi
