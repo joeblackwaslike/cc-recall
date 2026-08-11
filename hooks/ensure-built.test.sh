@@ -89,16 +89,33 @@ else
   fail "second run: expected build count to stay at 1, got $(build_count)"
 fi
 
+# --- Test 2b/2c: package.json and pnpm-lock.yaml are hashed inputs too, not just src/**/*.ts ---
+echo '{"name":"cc-recall","version":"0.1.1"}' > "$DIR/package.json"
+run_script "$DIR"
+if [[ "$(build_count)" == "2" ]]; then
+  pass "a package.json change triggers a rebuild"
+else
+  fail "package.json change: expected 2 build calls total, got $(build_count)"
+fi
+
+echo "lockfile: v2" > "$DIR/pnpm-lock.yaml"
+run_script "$DIR"
+if [[ "$(build_count)" == "3" ]]; then
+  pass "a pnpm-lock.yaml change triggers a rebuild"
+else
+  fail "pnpm-lock.yaml change: expected 3 build calls total, got $(build_count)"
+fi
+
 # --- Test 3: source changes after a successful build -- MUST rebuild, and the stamp must
 # reflect the NEW hash, not just re-trigger a build call. Verifying the stamp's content (not
 # just that build ran) is what would catch a rebuild that runs but never re-stamps.
 echo "export const x = 2; // changed" > "$DIR/src/a.ts"
 run_script "$DIR"
 STAMP_AFTER_REBUILD="$(cat "$DIR/dist/.build-stamp" 2>/dev/null || echo '')"
-if [[ "$(build_count)" == "2" ]]; then
+if [[ "$(build_count)" == "4" ]]; then
   pass "run after source change triggers a rebuild"
 else
-  fail "run after source change: expected 2 build calls total, got $(build_count) -- a source fix would silently never deploy"
+  fail "run after source change: expected 4 build calls total, got $(build_count) -- a source fix would silently never deploy"
 fi
 if [[ -n "$STAMP_AFTER_REBUILD" ]]; then
   pass "stamp file is written after a successful rebuild"
@@ -113,10 +130,10 @@ echo "export const y = 1;" > "$DIR/bin/cli.ts"
 STAMP_BEFORE_BIN_CHANGE="$(cat "$DIR/dist/.build-stamp" 2>/dev/null || echo '')"
 run_script "$DIR"
 STAMP_AFTER_BIN_CHANGE="$(cat "$DIR/dist/.build-stamp" 2>/dev/null || echo '')"
-if [[ "$(build_count)" == "3" ]]; then
+if [[ "$(build_count)" == "5" ]]; then
   pass "a bin/-only change also triggers a rebuild"
 else
-  fail "bin/-only change: expected 3 build calls total, got $(build_count) -- bin/ isn't in the hash"
+  fail "bin/-only change: expected 5 build calls total, got $(build_count) -- bin/ isn't in the hash"
 fi
 if [[ -n "$STAMP_AFTER_BIN_CHANGE" && "$STAMP_AFTER_BIN_CHANGE" != "$STAMP_BEFORE_BIN_CHANGE" ]]; then
   pass "stamp is updated to reflect the bin/-only rebuild"
