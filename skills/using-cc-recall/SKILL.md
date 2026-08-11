@@ -37,3 +37,9 @@ grep -rl "<specific term>" ~/.claude/projects/
 ## How it works
 
 Each session gets a `RecallRecord` with: title, summary, asks_implemented, completions, handoff_in/out, artifacts (files, tools, phrases), and three retrieval facets (completed, questioned, asked_about). Records are stored in a sidecar SQLite DB and optionally injected into the transcript itself.
+
+## Modifying cc-recall itself
+
+Before adding another headless-subprocess spawn (e.g. a new enrichment or backfill path), read
+[`references/known-failures.md`](references/known-failures.md) — it documents a confirmed
+failure mode where a spawned `claude -p` subprocess re-triggers the caller's own hooks.
