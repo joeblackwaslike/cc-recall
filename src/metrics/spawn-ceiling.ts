@@ -41,7 +41,8 @@ const logIncident = (kind: string, message: string, extra: Record<string, unknow
 
 export interface SpawnGateResult {
   allowed: boolean;
-  count: number;
+  /** The rolling-window count this decision was based on; `undefined` if it couldn't be read. */
+  count: number | undefined;
   ceiling: number;
   windowMs: number;
 }
@@ -70,8 +71,10 @@ export const admitEnrichmentSpawn = (now: number = Date.now()): SpawnGateResult 
     // Can't read the metrics file (permissions, a corrupted mount, disk trouble). Fail closed,
     // not open: a heuristic record is the same graceful degradation `synthesize` already applies
     // to every other enrichment failure, whereas failing open here would silently drop the
-    // ceiling's safety guarantee for as long as the I/O trouble lasts.
-    return { allowed: false, count: ceiling, ceiling, windowMs };
+    // ceiling's safety guarantee for as long as the I/O trouble lasts. `count: undefined` here is
+    // deliberate, not a stand-in for "at ceiling" -- the read failed, so the real count is
+    // unknown, not known-and-equal-to-ceiling.
+    return { allowed: false, count: undefined, ceiling, windowMs };
   }
 
   if (count >= ceiling) {
@@ -96,7 +99,10 @@ export const admitEnrichmentSpawn = (now: number = Date.now()): SpawnGateResult 
   } catch {
     // Same fail-closed reasoning as above: if this spawn can't be durably recorded, admitting it
     // anyway would let it run uncounted, silently defeating the ceiling on every later check.
-    return { allowed: false, count, ceiling, windowMs };
+    // `count: undefined` here too -- this denial isn't "count reached ceiling" (it didn't; that
+    // branch already returned above), it's "couldn't durably record it," the same unknown-count
+    // case as a read failure, not a fabricated exceeded-ceiling reading.
+    return { allowed: false, count: undefined, ceiling, windowMs };
   }
   return { allowed: true, count: count + 1, ceiling, windowMs };
 };

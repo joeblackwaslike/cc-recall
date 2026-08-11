@@ -411,6 +411,7 @@ describe('spawn-rate ceiling — metrics I/O failure', () => {
 
     const parsed = parseTranscriptText(transcriptOf('io-fail', 'ask'), '/repo/io-fail.jsonl');
     let wasCalled = false;
+    const warnings: string[] = [];
     const record = await synthesize(
       { parsed, project: 'proj', provenance: 'backfill' },
       {
@@ -418,10 +419,18 @@ describe('spawn-rate ceiling — metrics I/O failure', () => {
           wasCalled = true;
           return Promise.resolve(ENRICHMENT_JSON);
         },
+        onWarn: (message) => {
+          warnings.push(message);
+        },
       },
     );
     expect(wasCalled).toBe(false);
     expect(record.title).toBe('ask');
     expect(record.enrichment).toBe('heuristic');
+    // Not the "ceiling exceeded N/M" message -- nothing was actually counted or compared, the
+    // write just failed. A borrowed ceiling-exceeded message here would misleadingly claim a
+    // definitive count (e.g. "0/1") for a decision that was never based on one.
+    expect(record.enrichment_error).toMatch(/could not read the spawn-rate ceiling metrics/);
+    expect(warnings).toEqual([record.enrichment_error]);
   });
 });

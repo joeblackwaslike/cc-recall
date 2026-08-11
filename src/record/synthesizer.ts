@@ -387,8 +387,10 @@ export const synthesize = async (
   const gate = admitEnrichmentSpawn();
   if (!gate.allowed) {
     const message =
-      `enrichment paused: spawn-rate ceiling exceeded (${gate.count}/${gate.ceiling} per ` +
-      `${Math.round(gate.windowMs / MS_PER_MINUTE)}min window); using heuristic`;
+      gate.count === undefined
+        ? 'enrichment paused: could not read the spawn-rate ceiling metrics; using heuristic'
+        : `enrichment paused: spawn-rate ceiling exceeded (${gate.count}/${gate.ceiling} per ` +
+          `${Math.round(gate.windowMs / MS_PER_MINUTE)}min window); using heuristic`;
     options.onWarn?.(message);
     options.onLlmOutcome?.({ ok: false, error: message });
     return { ...base, enrichment: 'heuristic', enrichment_error: message };
