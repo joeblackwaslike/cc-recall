@@ -26,12 +26,20 @@ respond_and_exit() {
 # can't produce a spurious hash change. bin/ is included alongside src/ because tsconfig.json
 # compiles both into dist/ — hashing src/ alone means a bin/-only change is invisible here and
 # the stale artifact would never be rebuilt.
+#
+# Each TS file's path is written as a NUL-delimited boundary before and after its content
+# (rather than concatenating raw bytes back to back). Path + boundaries means two different
+# file sets whose contents happen to concatenate identically can't collide into the same hash,
+# and a file that moves without changing gets a different hash, as it should.
 current_hash() {
   {
     cat "$PLUGIN_DIR/package.json" 2>/dev/null
     cat "$PLUGIN_DIR/pnpm-lock.yaml" 2>/dev/null
-    find "$PLUGIN_DIR/src" "$PLUGIN_DIR/bin" -type f -name '*.ts' -print0 2>/dev/null \
-      | sort -z | xargs -0 cat 2>/dev/null
+    find "$PLUGIN_DIR/src" "$PLUGIN_DIR/bin" -type f -name '*.ts' -print0 2>/dev/null | sort -z \
+      | while IFS= read -r -d '' file; do
+          printf '\0%s\0' "$file"
+          cat "$file" 2>/dev/null
+        done
   } 2>/dev/null | shasum -a 256 | cut -d' ' -f1
 }
 
@@ -46,6 +54,9 @@ if ! command -v pnpm &>/dev/null; then
 fi
 
 cd "$PLUGIN_DIR"
+# install failure is deliberately tolerated (`|| true`), same as before this fix: node_modules
+# from a prior install may still be usable, and the build step below is the one that's actually
+# gated — an install failure that leaves the tree unbuildable just surfaces as a build failure.
 pnpm install --frozen-lockfile --ignore-scripts >/dev/null 2>&1 || true
 
 # Stamp only on a build that actually succeeded. A pre-existing dist/ from a prior successful

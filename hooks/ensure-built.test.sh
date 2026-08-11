@@ -68,6 +68,7 @@ build_count() {
 
 # --- Test 1: first run with no dist/ builds once ---
 DIR="$(setup_fake_plugin_dir)"
+trap 'rm -rf "$DIR"' EXIT
 FAKE_BIN="$(setup_fake_pnpm "$DIR")"
 CALL_LOG="$DIR/pnpm-calls.log"
 touch "$CALL_LOG"
@@ -109,11 +110,18 @@ fi
 # both into dist/, so hashing src/ alone would leave a bin/-only change permanently unbuilt. ---
 mkdir -p "$DIR/bin"
 echo "export const y = 1;" > "$DIR/bin/cli.ts"
+STAMP_BEFORE_BIN_CHANGE="$(cat "$DIR/dist/.build-stamp" 2>/dev/null || echo '')"
 run_script "$DIR"
+STAMP_AFTER_BIN_CHANGE="$(cat "$DIR/dist/.build-stamp" 2>/dev/null || echo '')"
 if [[ "$(build_count)" == "3" ]]; then
   pass "a bin/-only change also triggers a rebuild"
 else
   fail "bin/-only change: expected 3 build calls total, got $(build_count) -- bin/ isn't in the hash"
+fi
+if [[ -n "$STAMP_AFTER_BIN_CHANGE" && "$STAMP_AFTER_BIN_CHANGE" != "$STAMP_BEFORE_BIN_CHANGE" ]]; then
+  pass "stamp is updated to reflect the bin/-only rebuild"
+else
+  fail "stamp unchanged after bin/-only rebuild -- the build ran but the stamp write was skipped"
 fi
 
 # --- Test 5: a build that FAILS must NOT stamp the new hash over a pre-existing dist/. Stamping
@@ -124,6 +132,11 @@ touch "$DIR/.fail-build"
 echo "export const y = 2; // changed again, but the build will fail" > "$DIR/bin/cli.ts"
 BUILD_COUNT_BEFORE="$(build_count)"
 STAMP_BEFORE="$(cat "$DIR/dist/.build-stamp" 2>/dev/null || echo '')"
+if [[ -n "$STAMP_BEFORE" ]]; then
+  pass "a stamp exists going into the failure case, so the equality check below is meaningful"
+else
+  fail "no stamp present before the failure run -- the before/after comparison would be vacuous"
+fi
 run_script "$DIR"
 STAMP_AFTER_FAILURE="$(cat "$DIR/dist/.build-stamp" 2>/dev/null || echo '')"
 if [[ "$(build_count)" -gt "$BUILD_COUNT_BEFORE" ]]; then
@@ -137,8 +150,6 @@ else
   fail "stamp changed after a FAILED build -- the stale dist/ is now permanently marked current"
 fi
 rm -f "$DIR/.fail-build"
-
-rm -rf "$DIR"
 
 if [[ "$FAIL" == "1" ]]; then
   echo "--- ensure-built.test.sh: FAILED ---"
