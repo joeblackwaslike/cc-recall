@@ -175,17 +175,22 @@ export const indexSession = async (
 
   const sourceHash = computeSourceHash(text);
 
-  if (!options.force && sidecar.getSourceHash(parsed.sessionId) === sourceHash) {
+  // Repair mode bypasses the unchanged-hash skip entirely: the whole point of --only-heuristic
+  // is re-synthesizing a session whose transcript hasn't changed but whose stored record degraded
+  // to heuristic last time. Gating repair behind the ordinary unchanged check meant the advertised
+  // repair command silently did nothing for the common case -- the transcript that never changed
+  // is exactly what makes a session "unchanged" and exactly what --only-heuristic exists to fix.
+  if (options.onlyHeuristic) {
+    if (isAlreadyEnriched(sidecar, parsed.sessionId, options)) {
+      return {
+        sessionId: parsed.sessionId,
+        title: '(already enriched)',
+        written: false,
+        skipped: true,
+      };
+    }
+  } else if (!options.force && sidecar.getSourceHash(parsed.sessionId) === sourceHash) {
     return { sessionId: parsed.sessionId, title: '(unchanged)', written: false, skipped: true };
-  }
-
-  if (isAlreadyEnriched(sidecar, parsed.sessionId, options)) {
-    return {
-      sessionId: parsed.sessionId,
-      title: '(already enriched)',
-      written: false,
-      skipped: true,
-    };
   }
 
   const input = {
@@ -419,9 +424,17 @@ export const backfill = async (
       options.onWarn?.(`backfill stopped after ${summary.processed}/${summary.total}: ${stop}`);
       break;
     }
+    // An explicit caller-supplied skipG0/skipClaudeMem always wins over the gate's own decision --
+    // spreading the gate's result after `...options` would silently overwrite a caller's explicit
+    // `false` (e.g. "force the per-record probe despite the batch optimization") with whatever the
+    // gate decided for everyone else in this run.
+    const gateDecision = await claudeMem.decide();
+    const skipG0 = options.skipG0 ?? gateDecision.skipG0;
+    const skipClaudeMem = options.skipClaudeMem ?? gateDecision.skipClaudeMem;
     const perFile: IndexOptions = {
       ...options,
-      ...(await claudeMem.decide()),
+      ...(skipG0 !== undefined && { skipG0 }),
+      ...(skipClaudeMem !== undefined && { skipClaudeMem }),
       onLlmOutcome: budget.record,
     };
     await backfillOne(file, sidecar, perFile, summary);

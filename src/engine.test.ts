@@ -141,6 +141,29 @@ const seedBatch = (dir: string, count: number): void => {
 };
 
 /**
+ * Seeds two sessions and runs one backfill pass where the first enriches and the second degrades
+ * (LLM rejects). Shared setup for the --only-heuristic repair tests below.
+ */
+const seedOneEnrichedOneDegraded = async (
+  sidecar: Sidecar,
+  projectDir: string,
+  root: string,
+  baseDir: string,
+): Promise<void> => {
+  seedBatch(projectDir, TWO);
+  let call = 0;
+  await backfill(sidecar, {
+    projectsRoot: root,
+    baseDir,
+    skipClaudeMem: true,
+    llm: () => {
+      call += 1;
+      return call === 1 ? Promise.resolve(STUB_ENRICHMENT) : Promise.reject(new Error('down'));
+    },
+  });
+};
+
+/**
  * Enrichment failure is deliberately not an error — one degraded record beats a failed run. The
  * hazard is that nothing throws, `failed` stays 0, and a run that lost the LLM entirely reports a
  * clean sweep. It also gets there sooner than a healthy run, because a failing call returns in
@@ -276,18 +299,7 @@ describe('engine — heuristic records are identifiable and repairable', () => {
   });
 
   it('--only-heuristic re-synthesizes the degraded and leaves the enriched alone', async () => {
-    seedBatch(projectDir, TWO);
-    // First pass: session 0 enriched, session 1 degraded.
-    let call = 0;
-    await backfill(sidecar, {
-      projectsRoot: root,
-      baseDir,
-      skipClaudeMem: true,
-      llm: () => {
-        call += 1;
-        return call === 1 ? Promise.resolve(STUB_ENRICHMENT) : Promise.reject(new Error('down'));
-      },
-    });
+    await seedOneEnrichedOneDegraded(sidecar, projectDir, root, baseDir);
 
     // Repair pass with force, so the hash check does not skip everything.
     let repairCalls = 0;
@@ -307,6 +319,29 @@ describe('engine — heuristic records are identifiable and repairable', () => {
     // synthesis rather than after.
     expect(repairCalls).toBe(1);
     expect(repair.skipped).toBe(1);
+    expect(sidecar.get('s-batch-1')?.enrichment).toBe('llm');
+  });
+
+  it('--only-heuristic alone repairs a degraded session, without also requiring --force', async () => {
+    // The advertised repair command is `--only-heuristic`, not `--only-heuristic --force`. A
+    // degraded record's transcript is typically unchanged since it was last indexed -- that's
+    // the normal repair scenario -- so if onlyHeuristic doesn't bypass the unchanged-hash skip on
+    // its own, the command silently does nothing for the exact case it exists to fix.
+    await seedOneEnrichedOneDegraded(sidecar, projectDir, root, baseDir);
+
+    let repairCalls = 0;
+    await backfill(sidecar, {
+      projectsRoot: root,
+      baseDir,
+      skipClaudeMem: true,
+      onlyHeuristic: true,
+      llm: () => {
+        repairCalls += 1;
+        return Promise.resolve(STUB_ENRICHMENT);
+      },
+    });
+
+    expect(repairCalls).toBe(1);
     expect(sidecar.get('s-batch-1')?.enrichment).toBe('llm');
   });
 });
