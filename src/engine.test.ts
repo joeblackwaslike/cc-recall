@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -54,6 +54,12 @@ describe('engine', () => {
     mkdirSync(path.join(root, PROJECT_DIR), { recursive: true });
     file = path.join(root, PROJECT_DIR, `${SESSION}.jsonl`);
     writeFileSync(file, transcript);
+    // Backdate: most tests in this block backfill this fixture, which represents a historical,
+    // already-closed session, not one actively appending right now (cc-recall-kg8's guard).
+    // `appendMidSynthesis` explicitly re-touches the file to simulate a live append and is
+    // exempted from this by using an injected `llm` runner, not a real timing gap.
+    const past = new Date(Date.now() - ONE_HOUR_MS);
+    utimesSync(file, past, past);
     sidecar = openSidecar(':memory:');
   });
   afterEach(() => {
@@ -123,12 +129,16 @@ const SIX = 6;
 const EIGHT = 8;
 const TEN = 10;
 const TWO = 2;
+const MINUTES_PER_HOUR = 60;
+const SECONDS_PER_MINUTE = 60;
+const ONE_HOUR_MS = MINUTES_PER_HOUR * SECONDS_PER_MINUTE * 1000;
 
 const seedBatch = (dir: string, count: number): void => {
   for (let index = 0; index < count; index += 1) {
     const id = `s-batch-${index}`;
+    const file = path.join(dir, `${id}.jsonl`);
     writeFileSync(
-      path.join(dir, `${id}.jsonl`),
+      file,
       `${JSON.stringify({
         type: 'user',
         sessionId: id,
@@ -137,6 +147,10 @@ const seedBatch = (dir: string, count: number): void => {
         message: { role: 'user', content: [{ type: 'text', text: `session ${index}` }] },
       })}\n`,
     );
+    // Backdate: these fixtures represent historical, already-closed sessions being backfilled,
+    // not a session actively appending right now (cc-recall-kg8's active-session guard).
+    const past = new Date(Date.now() - ONE_HOUR_MS);
+    utimesSync(file, past, past);
   }
 };
 
