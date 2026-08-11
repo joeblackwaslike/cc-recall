@@ -26,6 +26,7 @@ import {
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { RECALL_RECORD_TYPE, type RecallRecord } from '../record/schema.js';
+import { LLM_TIMEOUT_MS } from '../record/synthesizer.js';
 import { parseTranscriptText } from '../transcript/parse.js';
 
 /** Marker stamped on the ai-title record we own, so re-runs replace (not duplicate) it. */
@@ -372,11 +373,32 @@ const atomicWrite = (
  * inode keeps writing into it forever after the rename, invisibly — the write lands nowhere
  * any path references, and the data is lost the moment that fd closes. No hash check catches
  * this, because the hash only detects content that already changed, not a write about to
- * happen. mtime recency is the only signal available without inspecting live process state,
- * so it's a heuristic, not a guarantee — sized a little past LLM_TIMEOUT_MS's 60s scale, since
- * a live session can resume writing at any time, not just within that specific window.
+ * happen. mtime recency is the only signal available without inspecting live process state, so
+ * it's a heuristic, not a guarantee — double `LLM_TIMEOUT_MS`, derived rather than a second
+ * hardcoded number, so the two can't silently drift apart if the timeout ever changes. A live
+ * session can resume writing at any time, not just within that specific window, hence the
+ * multiplier rather than an exact match.
  */
-const ACTIVE_SESSION_GRACE_MS = 120_000;
+const ACTIVE_SESSION_GRACE_MULTIPLIER = 2;
+const ACTIVE_SESSION_GRACE_MS = LLM_TIMEOUT_MS * ACTIVE_SESSION_GRACE_MULTIPLIER;
+
+/**
+ * Whether `filePath`'s mtime is recent enough to be possibly live. A heuristic, not a
+ * guarantee -- and the only piece of the liveness check that our own prior write can trigger
+ * a false positive on, since writing IS what sets mtime.
+ */
+const hasRecentMtime = (filePath: string): boolean => {
+  try {
+    return Date.now() - statSync(filePath).mtimeMs < ACTIVE_SESSION_GRACE_MS;
+  } catch (error) {
+    // ENOENT is the one case that's actually safe to treat as idle: the file is gone, so there's
+    // nothing to race against. Anything else (EACCES, a transient I/O error) is anomalous at this
+    // point -- the caller already read this same path successfully moments earlier in this same
+    // call -- and this heuristic's whole job is to be cautious, so an error it can't explain
+    // means "possibly active", not "definitely not".
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+};
 
 /**
  * Whether `filePath` might belong to a session that's still running.
@@ -387,14 +409,21 @@ const ACTIVE_SESSION_GRACE_MS = 120_000;
  * skip every ordinary forward-capture write. The risk this guards against is backfill or a
  * manual re-index sweeping a transcript that belongs to a *different*, currently-running
  * session (another terminal, a resumed `--continue`) that this process has no other way to see.
+ *
+ * `isMtimeCheckExempt` exempts only the heuristic half, not the `CLAUDE_SESSION_ID` match: our own
+ * prior write can produce a false-positive fresh mtime, but it can never produce a false-positive
+ * *session ID* match — that signal is definitive and Claude Code's, not something cc-recall's own
+ * write could cause. Suppressing it too would mean a `--force` repair of a transcript belonging
+ * to the session literally invoking us right now goes unguarded.
  */
-const isPossiblyActive = (filePath: string, sessionId: string): boolean => {
+const isPossiblyActive = (
+  filePath: string,
+  sessionId: string,
+  isMtimeCheckExempt: boolean,
+): boolean => {
   if (process.env.CLAUDE_SESSION_ID === sessionId) return true;
-  try {
-    return Date.now() - statSync(filePath).mtimeMs < ACTIVE_SESSION_GRACE_MS;
-  } catch {
-    return false;
-  }
+  if (isMtimeCheckExempt) return false;
+  return hasRecentMtime(filePath);
 };
 
 const isIntegrityValid = (filePath: string, record: RecallRecord, origErrors: number): boolean => {
@@ -427,19 +456,22 @@ const preWriteSkipReason = (
   isUnchangedByUs: boolean,
 ): WriteResult['skipReason'] | undefined => {
   if (!options.force && isUnchangedByUs) return 'unchanged';
+  // No `!options.force` guard here, unlike `unchanged` above: `force` means "write even if the
+  // sidecar thinks this is already indexed," not "write even over content newer than what was
+  // synthesized." Those are different questions -- force never bypasses a confirmed mismatch.
   if (options.expectedSourceHash !== undefined && options.expectedSourceHash !== sourceHash) {
     return 'stale-source';
   }
   // `forward` writes are triggered by SessionEnd, whose transcript is never live by the time the
   // hook fires — skip the liveness heuristic there so it can't skip an ordinary write. Everything
   // else (backfill, manual) can be sweeping a transcript that belongs to a session running
-  // somewhere else entirely, which no hash check can see coming. Also skipped when
+  // somewhere else entirely, which no hash check can see coming. The mtime half is skipped when
   // `isUnchangedByUs`: a `force` re-write of content cc-recall already wrote is not a liveness
-  // risk just because *our own* prior write left a fresh mtime behind.
+  // risk just because *our own* prior write left a fresh mtime behind. The session-ID half is
+  // never skipped -- see isPossiblyActive's doc comment for why.
   if (
-    !isUnchangedByUs &&
     record.provenance !== 'forward' &&
-    isPossiblyActive(filePath, record.session_id)
+    isPossiblyActive(filePath, record.session_id, isUnchangedByUs)
   ) {
     return 'active-session';
   }

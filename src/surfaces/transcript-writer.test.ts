@@ -16,6 +16,7 @@ const FIRST_PROMPT = 'do the thing';
 const MINUTES = 10;
 const SECONDS_PER_MINUTE = 60;
 const TEN_MINUTES_MS = MINUTES * SECONDS_PER_MINUTE * 1000;
+const ACTIVE_SESSION = 'active-session';
 const native = `${[
   JSON.stringify({
     type: 'user',
@@ -275,7 +276,7 @@ describe('transcript-writer — live-session guard', () => {
     );
     expect(result.written).toBe(false);
     expect(result.skipped).toBe(true);
-    expect(result.skipReason).toBe('active-session');
+    expect(result.skipReason).toBe(ACTIVE_SESSION);
     expect(readFileSync(file, 'utf8')).toBe(native); // untouched
   });
 
@@ -302,7 +303,7 @@ describe('transcript-writer — live-session guard', () => {
       { ...makeRecord(), provenance: 'backfill' },
       { baseDir: dir },
     );
-    expect(result.skipReason).toBe('active-session');
+    expect(result.skipReason).toBe(ACTIVE_SESSION);
   });
 
   it('writes a backfill record once the transcript has gone idle', () => {
@@ -315,5 +316,47 @@ describe('transcript-writer — live-session guard', () => {
       { baseDir: dir },
     );
     expect(result.written).toBe(true);
+  });
+
+  it('reports stale-source, not active-session, when both would apply', () => {
+    // Fresh mtime (default from useTranscript's beforeEach) makes the liveness guard fire on its
+    // own. Also pass a stale expectedSourceHash so the hash-mismatch check fires too -- the
+    // hash-confirmed diagnosis must win, since it's a fact rather than a guess.
+    const result = writeRecordToTranscript(
+      file,
+      { ...makeRecord(), provenance: 'backfill' },
+      { baseDir: dir, expectedSourceHash: 'deliberately-wrong-hash' },
+    );
+    expect(result.skipReason).toBe('stale-source');
+  });
+
+  it('still honors a CLAUDE_SESSION_ID match even when force + unchanged content would otherwise exempt it', () => {
+    // Backdate first, so this establishing write isn't itself blocked by the fresh-mtime
+    // heuristic (the file was just created by useTranscript's beforeEach) -- it needs to
+    // actually succeed to establish content cc-recall already wrote, so isUnchangedByUs is true
+    // on the next call, the exact condition that exempts the mtime heuristic.
+    const oldTime = new Date(Date.now() - TEN_MINUTES_MS);
+    utimesSync(file, oldTime, oldTime);
+    const first = writeRecordToTranscript(
+      file,
+      { ...makeRecord(), provenance: 'backfill' },
+      { baseDir: dir },
+    );
+    expect(first.written).toBe(true); // sanity: the premise this test depends on actually held
+
+    // The session-ID signal is definitive (Claude Code's, not something our own write could
+    // fake), so it must still win: --force repairing a transcript belonging to the session
+    // literally invoking us right now is exactly the live-write race this guard exists to
+    // prevent, unchanged content or not. The write above just gave the file a fresh mtime again
+    // (atomicWrite/rename), which would ALSO trigger the guard on its own -- setting the session
+    // ID doesn't need that help, but it's realistic and worth leaving in place.
+    process.env.CLAUDE_SESSION_ID = SESSION;
+
+    const result = writeRecordToTranscript(
+      file,
+      { ...makeRecord(), provenance: 'backfill' },
+      { baseDir: dir, force: true },
+    );
+    expect(result.skipReason).toBe(ACTIVE_SESSION);
   });
 });
