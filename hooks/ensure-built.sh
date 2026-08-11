@@ -32,7 +32,7 @@ current_hash() {
     cat "$PLUGIN_DIR/pnpm-lock.yaml" 2>/dev/null
     find "$PLUGIN_DIR/src" "$PLUGIN_DIR/bin" -type f -name '*.ts' -print0 2>/dev/null \
       | sort -z | xargs -0 cat 2>/dev/null
-  } | shasum -a 256 | cut -d' ' -f1
+  } 2>/dev/null | shasum -a 256 | cut -d' ' -f1
 }
 
 if [[ -f "$DIST_ENTRY" && -f "$STAMP_FILE" ]]; then
