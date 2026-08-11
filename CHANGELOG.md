@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.2.0...cc-recall-v0.2.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* **release:** bump plugin.json, sync it via release-please, fix broken publish/docs jobs ([#66](https://github.com/joeblackwaslike/cc-recall/issues/66)) ([cdb12bd](https://github.com/joeblackwaslike/cc-recall/commit/cdb12bd2f5af4eba3cc9b4711631457d5de21f48))
+
 ## [0.2.0](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.1.0...cc-recall-v0.2.0) (2026-08-11)
 
 
