@@ -6,10 +6,6 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue)](https://www.typescriptlang.org)
 [![Discord](https://img.shields.io/discord/1486035859747897414?logo=discord&label=Discord&color=5865F2)](https://discord.gg/Fjc9zYHZyV)
 
-> [!WARNING]
-> ### 🛑 Do not use cc-recall until this warning is removed
-> There is a **P0 critical bug** being worked on right now — the `SessionEnd`/`UserPromptSubmit` hooks can trigger runaway re-indexing, spawning duplicate indexing sub-agent sessions repeatedly (seconds apart) and burning API quota with no user action. The plugin has been disabled (`cc-recall@agent-marketplace: false` in `~/.claude/settings.json`) pending a fix. Do not re-enable until this banner is removed.
-
 Discoverability and enrichment for Claude Code session transcripts.
 
 ## The Problem
