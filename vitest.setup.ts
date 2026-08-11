@@ -6,8 +6,16 @@
 // -- discovered when a full local test run wrote 30 fake events and started throttling actual
 // cc-recall usage to heuristic-only for the following hour. Individual tests that need a
 // specific metrics dir (e.g. the spawn-ceiling suite) still override this via `vi.stubEnv`.
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { afterAll } from 'vitest';
 
-process.env.CC_RECALL_METRICS_DIR = mkdtempSync(path.join(tmpdir(), 'cc-recall-test-metrics-'));
+const scratchDir = mkdtempSync(path.join(tmpdir(), 'cc-recall-test-metrics-'));
+process.env.CC_RECALL_METRICS_DIR = scratchDir;
+
+// Don't leave orphaned scratch dirs behind on every run -- the exact "unbounded growth from
+// never-cleaned-up state" class of bug this whole ticket exists to guard against.
+afterAll(() => {
+  rmSync(scratchDir, { recursive: true, force: true });
+});

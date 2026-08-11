@@ -62,17 +62,41 @@ export interface SpawnGateResult {
 export const admitEnrichmentSpawn = (now: number = Date.now()): SpawnGateResult => {
   const ceiling = spawnCeiling();
   const windowMs = spawnWindowMs();
-  const count = countRecentEnrichmentSpawns(windowMs, now);
+
+  let count: number;
+  try {
+    count = countRecentEnrichmentSpawns(windowMs, now);
+  } catch {
+    // Can't read the metrics file (permissions, a corrupted mount, disk trouble). Fail closed,
+    // not open: a heuristic record is the same graceful degradation `synthesize` already applies
+    // to every other enrichment failure, whereas failing open here would silently drop the
+    // ceiling's safety guarantee for as long as the I/O trouble lasts.
+    return { allowed: false, count: ceiling, ceiling, windowMs };
+  }
 
   if (count >= ceiling) {
-    logIncident('spawn_ceiling_paused', 'enrichment spawn-rate ceiling exceeded; using heuristic', {
-      count,
-      ceiling,
-      windowMs,
-    });
+    try {
+      logIncident(
+        'spawn_ceiling_paused',
+        'enrichment spawn-rate ceiling exceeded; using heuristic',
+        {
+          count,
+          ceiling,
+          windowMs,
+        },
+      );
+    } catch {
+      /* best-effort audit log; the ceiling decision itself does not depend on it */
+    }
     return { allowed: false, count, ceiling, windowMs };
   }
 
-  logEnrichmentSpawn();
+  try {
+    logEnrichmentSpawn();
+  } catch {
+    // Same fail-closed reasoning as above: if this spawn can't be durably recorded, admitting it
+    // anyway would let it run uncounted, silently defeating the ceiling on every later check.
+    return { allowed: false, count, ceiling, windowMs };
+  }
   return { allowed: true, count: count + 1, ceiling, windowMs };
 };

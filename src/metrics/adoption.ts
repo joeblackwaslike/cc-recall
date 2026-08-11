@@ -91,10 +91,15 @@ const readEvents = (): AdoptionEvent[] => {
 /** Count `enrichment_spawn` events timestamped within the trailing `windowMs` ending at `now`. */
 export const countRecentEnrichmentSpawns = (windowMs: number, now: number = Date.now()): number => {
   const since = now - windowMs;
-  return readEvents().filter(
-    (event): event is EnrichmentSpawnEvent =>
-      event.kind === 'enrichment_spawn' && Date.parse(event.ts) >= since,
-  ).length;
+  return readEvents().filter((event): event is EnrichmentSpawnEvent => {
+    if (event.kind !== 'enrichment_spawn') return false;
+    const ts = Date.parse(event.ts);
+    // Excludes future-dated timestamps (clock skew, a corrupted write) as well as past-window
+    // ones. Without the upper bound, a single future-dated event counts as "recent" forever --
+    // not just until it naturally ages out -- permanently inflating the rolling count until
+    // someone notices and hand-edits the file.
+    return ts >= since && ts <= now;
+  }).length;
 };
 
 export const readAdoptionMetrics = (): AdoptionReport => {

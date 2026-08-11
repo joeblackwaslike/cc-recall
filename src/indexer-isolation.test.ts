@@ -383,5 +383,45 @@ describe('spawn-rate ceiling', () => {
     expect(record.enrichment).toBe('heuristic');
     expect(record.enrichment_error).toBeUndefined();
     expect(existsSync(path.join(metricsRoot, 'adoption.jsonl'))).toBe(false);
+    expect(existsSync(path.join(metricsRoot, 'incidents.jsonl'))).toBe(false);
+  });
+});
+
+describe('spawn-rate ceiling — metrics I/O failure', () => {
+  let metricsRoot: string;
+
+  beforeEach(() => {
+    metricsRoot = mkdtempSync(path.join(tmpdir(), 'cc-recall-spawn-'));
+    vi.stubEnv('CC_RECALL_SPAWN_CEILING', '1');
+    vi.stubEnv('CC_RECALL_SPAWN_WINDOW_MS', String(ONE_HOUR_MS));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(metricsRoot, { recursive: true, force: true });
+  });
+
+  // If the ceiling can't durably record a spawn (disk trouble, permissions), admitting it
+  // anyway would run uncounted and silently defeat the ceiling forever after. Fails closed
+  // instead: same graceful degradation as any other enrichment failure, never a crash.
+  it('falls back to heuristic, without crashing or invoking the LLM, when the metrics dir cannot be created', async () => {
+    const blockedDir = path.join(metricsRoot, 'blocking-file', 'metrics');
+    writeFileSync(path.join(metricsRoot, 'blocking-file'), 'not a directory');
+    vi.stubEnv('CC_RECALL_METRICS_DIR', blockedDir);
+
+    const parsed = parseTranscriptText(transcriptOf('io-fail', 'ask'), '/repo/io-fail.jsonl');
+    let wasCalled = false;
+    const record = await synthesize(
+      { parsed, project: 'proj', provenance: 'backfill' },
+      {
+        llm: () => {
+          wasCalled = true;
+          return Promise.resolve(ENRICHMENT_JSON);
+        },
+      },
+    );
+    expect(wasCalled).toBe(false);
+    expect(record.title).toBe('ask');
+    expect(record.enrichment).toBe('heuristic');
   });
 });
