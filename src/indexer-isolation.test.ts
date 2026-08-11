@@ -8,7 +8,7 @@
 // The convergence test at the bottom is the one that pins the bug class; the rest check the
 // mechanics that produce it.
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -85,6 +85,9 @@ const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 
 const OVERRIDE_MODEL = 'claude-sonnet-5';
 const WHITESPACE_ONLY = '\t \n';
+const MINUTES_PER_HOUR = 60;
+const SECONDS_PER_MINUTE = 60;
+const ONE_HOUR_MS = MINUTES_PER_HOUR * SECONDS_PER_MINUTE * 1000;
 
 /** The argv `runClaudeHeadless` should produce for a given model. */
 const invocation = (model: string): string[] => ['-p', '--model', model];
@@ -197,6 +200,11 @@ describe('corpus exclusion and convergence', () => {
     mkdirSync(path.join(root, dir), { recursive: true });
     const file = path.join(root, dir, `${id}.jsonl`);
     writeFileSync(file, transcriptOf(id, prompt));
+    // Backdate: these fixtures represent historical, already-closed sessions being backfilled,
+    // not a session actively appending right now. A real mtime this fresh would (correctly) be
+    // treated as possibly live by the writer's active-session guard (cc-recall-kg8).
+    const past = new Date(Date.now() - ONE_HOUR_MS);
+    utimesSync(file, past, past);
     return file;
   };
 

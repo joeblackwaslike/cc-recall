@@ -154,6 +154,12 @@ const writeToTranscript = (
     options.onWarn?.(
       `transcript grew during synthesis; in-transcript record not updated: ${filePath}`,
     );
+  } else if (write.skipReason === 'active-session') {
+    // Same inconsistency as stale-source, different cause: the writer declined because the
+    // transcript looked live, not because the content changed. Also transient — it clears once
+    // the session goes idle and a later pass (backfill's own idempotency check sees the sidecar
+    // already has this record, so it costs nothing to retry).
+    options.onWarn?.(`transcript looked live, in-transcript record not updated: ${filePath}`);
   }
   return write;
 };

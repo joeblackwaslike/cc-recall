@@ -19,6 +19,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -143,7 +144,11 @@ interface WriteOutcome {
  */
 export type WriteResult =
   | (WriteOutcome & { written: true; skipped: false; skipReason?: never })
-  | (WriteOutcome & { written: false; skipped: true; skipReason: 'unchanged' | 'stale-source' });
+  | (WriteOutcome & {
+      written: false;
+      skipped: true;
+      skipReason: 'unchanged' | 'stale-source' | 'active-session';
+    });
 
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
 
@@ -186,6 +191,10 @@ const classify = (text: string): Classified => {
  * paying for synthesis.
  */
 export const computeSourceHash = (text: string): string => sha256(classify(text).kept.join('\n'));
+
+/** Re-read and hash the file as it exists on disk right now. */
+const currentSourceHash = (filePath: string): string =>
+  computeSourceHash(readFileSync(filePath, 'utf8'));
 
 const buildContent = (
   kept: readonly string[],
@@ -356,6 +365,38 @@ const atomicWrite = (
   fsyncParentDirectory(filePath, onWarn);
 };
 
+/**
+ * How long after a transcript's last write it's still treated as possibly live.
+ *
+ * `renameSync` replaces the target path's inode; a process holding an append fd to the OLD
+ * inode keeps writing into it forever after the rename, invisibly — the write lands nowhere
+ * any path references, and the data is lost the moment that fd closes. No hash check catches
+ * this, because the hash only detects content that already changed, not a write about to
+ * happen. mtime recency is the only signal available without inspecting live process state,
+ * so it's a heuristic, not a guarantee — sized a little past LLM_TIMEOUT_MS's 60s scale, since
+ * a live session can resume writing at any time, not just within that specific window.
+ */
+const ACTIVE_SESSION_GRACE_MS = 120_000;
+
+/**
+ * Whether `filePath` might belong to a session that's still running.
+ *
+ * Scoped to non-`forward` provenance only by the caller: a `forward` write is triggered by
+ * `SessionEnd`, which by definition fires after that session's own process has exited — its
+ * transcript always has a fresh mtime and is never live, so applying this check there would
+ * skip every ordinary forward-capture write. The risk this guards against is backfill or a
+ * manual re-index sweeping a transcript that belongs to a *different*, currently-running
+ * session (another terminal, a resumed `--continue`) that this process has no other way to see.
+ */
+const isPossiblyActive = (filePath: string, sessionId: string): boolean => {
+  if (process.env.CLAUDE_SESSION_ID === sessionId) return true;
+  try {
+    return Date.now() - statSync(filePath).mtimeMs < ACTIVE_SESSION_GRACE_MS;
+  } catch {
+    return false;
+  }
+};
+
 const isIntegrityValid = (filePath: string, record: RecallRecord, origErrors: number): boolean => {
   const reparsed = parseTranscriptText(readFileSync(filePath, 'utf8'), filePath);
   return (
@@ -369,40 +410,75 @@ const isIntegrityValid = (filePath: string, record: RecallRecord, origErrors: nu
  * Inject (or replace) the cc-recall record + title in a transcript, safely.
  * Returns `{ skipped: true }` when the source is unchanged since the last write.
  */
-export const writeRecordToTranscript = (
+/**
+ * Every reason `writeRecordToTranscript` can decline before attempting the write, in priority
+ * order. `undefined` means proceed.
+ *
+ * `unchanged`/`stale-source` are precise, hash-confirmed diagnoses; `active-session` is a
+ * weaker heuristic guess and is checked last so a confirmed reason always wins when both apply
+ * (e.g. a live append that already changed the content reports `stale-source`, not the vaguer
+ * `active-session`, even though the fresh mtime would also match).
+ */
+const preWriteSkipReason = (
   filePath: string,
   record: RecallRecord,
-  options: WriteOptions = {},
-): WriteResult => {
-  const baseDir = options.baseDir ?? defaultBaseDir();
-  const backupPath = backupPathFor(record.session_id, baseDir);
-  const original = readFileSync(filePath, 'utf8');
-  const { kept, hadRecallRecord, markerHash } = classify(original);
-  const sourceHash = sha256(kept.join('\n'));
-
-  if (!options.force && hadRecallRecord && markerHash === sourceHash) {
-    return { written: false, skipped: true, skipReason: 'unchanged', sourceHash, backupPath };
-  }
-
-  // Claude Code appends to live transcripts while we work. This function does read the file
-  // once above, to compute `sourceHash` for the idempotency check — what it deliberately does
-  // not do is re-read to compare, because the dangerous window is not inside this function. It
-  // spans the caller's read, synthesis (up to the LLM timeout), and this write, so the guard
-  // belongs at the caller level via `expectedSourceHash`: the record must have been synthesized
-  // from the content at that hash, not from an older snapshot.
-  //
-  // This is about *where* the window is, not a claim that re-reading is useless — `didRevertTranscript`
-  // does re-read and compare, correctly. Its window is synchronous and bounded (read, classify,
-  // write), so a second read genuinely narrows it. Here the window contains an LLM call, which no
-  // amount of re-reading inside this function can cover.
+  options: WriteOptions,
+  sourceHash: string,
+  isUnchangedByUs: boolean,
+): WriteResult['skipReason'] | undefined => {
+  if (!options.force && isUnchangedByUs) return 'unchanged';
   if (options.expectedSourceHash !== undefined && options.expectedSourceHash !== sourceHash) {
-    return { written: false, skipped: true, skipReason: 'stale-source', sourceHash, backupPath };
+    return 'stale-source';
   }
+  // `forward` writes are triggered by SessionEnd, whose transcript is never live by the time the
+  // hook fires — skip the liveness heuristic there so it can't skip an ordinary write. Everything
+  // else (backfill, manual) can be sweeping a transcript that belongs to a session running
+  // somewhere else entirely, which no hash check can see coming. Also skipped when
+  // `isUnchangedByUs`: a `force` re-write of content cc-recall already wrote is not a liveness
+  // risk just because *our own* prior write left a fresh mtime behind.
+  if (
+    !isUnchangedByUs &&
+    record.provenance !== 'forward' &&
+    isPossiblyActive(filePath, record.session_id)
+  ) {
+    return 'active-session';
+  }
+  return undefined;
+};
 
-  const origErrors = parseTranscriptText(original, filePath).parseErrors;
+/**
+ * Stage, commit, and verify the write, backup/snapshot bookkeeping included.
+ * Assumes every pre-write skip check has already passed.
+ */
+interface CommitWriteInput {
+  filePath: string;
+  record: RecallRecord;
+  kept: readonly string[];
+  sourceHash: string;
+  backupPath: string;
+  origErrors: number;
+  options: WriteOptions;
+}
+
+const commitWrite = ({
+  filePath,
+  record,
+  kept,
+  sourceHash,
+  backupPath,
+  origErrors,
+  options,
+}: CommitWriteInput): WriteResult => {
   ensureOriginalBackup(filePath, backupPath);
   const snapshot = takePreWriteSnapshot(filePath);
   try {
+    // ensureOriginalBackup/takePreWriteSnapshot are themselves filesystem I/O with nonzero
+    // duration, so re-check right before the write that nothing landed since the hash was
+    // computed above -- the narrowest this window gets without OS-level locking this module
+    // doesn't have.
+    if (currentSourceHash(filePath) !== sourceHash) {
+      return { written: false, skipped: true, skipReason: 'stale-source', sourceHash, backupPath };
+    }
     atomicWrite(filePath, buildContent(kept, record, sourceHash), options.onWarn);
 
     const verify = options.verifyIntegrity ?? isIntegrityValid;
@@ -416,6 +492,38 @@ export const writeRecordToTranscript = (
     discardSnapshot(snapshot, options.onWarn);
   }
   return { written: true, skipped: false, sourceHash, backupPath };
+};
+
+export const writeRecordToTranscript = (
+  filePath: string,
+  record: RecallRecord,
+  options: WriteOptions = {},
+): WriteResult => {
+  const baseDir = options.baseDir ?? defaultBaseDir();
+  const backupPath = backupPathFor(record.session_id, baseDir);
+  const original = readFileSync(filePath, 'utf8');
+  const { kept, hadRecallRecord, markerHash } = classify(original);
+  const sourceHash = sha256(kept.join('\n'));
+  // True when the file's content is exactly what cc-recall itself last wrote for it -- the
+  // ordinary idempotent case, `force` or not. Decides whether a fresh mtime means "possibly
+  // live" or just "we wrote this a moment ago", which `force` alone can't tell.
+  const isUnchangedByUs = hadRecallRecord && markerHash === sourceHash;
+
+  // Claude Code appends to live transcripts while we work. This function does read the file
+  // once above, to compute `sourceHash` for the idempotency check — what it deliberately does
+  // not do is re-read to compare here, because the dangerous window is not inside this function.
+  // It spans the caller's read, synthesis (up to the LLM timeout), and this write, so that guard
+  // belongs at the caller level via `expectedSourceHash` (checked in `preWriteSkipReason`): the
+  // record must have been synthesized from the content at that hash, not an older snapshot.
+  // `didRevertTranscript` re-reads and compares for the same reason it's safe to there and not
+  // here — its window is synchronous and bounded; this one contains an LLM call.
+  const skipReason = preWriteSkipReason(filePath, record, options, sourceHash, isUnchangedByUs);
+  if (skipReason !== undefined) {
+    return { written: false, skipped: true, skipReason, sourceHash, backupPath };
+  }
+
+  const origErrors = parseTranscriptText(original, filePath).parseErrors;
+  return commitWrite({ filePath, record, kept, sourceHash, backupPath, origErrors, options });
 };
 
 /** Whether the file carries a cc-recall record belonging to this session. */
