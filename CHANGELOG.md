@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.2.2...cc-recall-v0.3.0) (2026-08-14)
+
+
+### Features
+
+* **doctor:** detect an uninstalled/not-running cc-recall-watchdog ([#70](https://github.com/joeblackwaslike/cc-recall/issues/70)) ([bcd3a30](https://github.com/joeblackwaslike/cc-recall/commit/bcd3a30af37ff0b5bd3d3279a418239452ef51c3))
+* **engine:** dual-signal indexer self-recognition, loud mismatch incident ([#72](https://github.com/joeblackwaslike/cc-recall/issues/72)) ([d7353e4](https://github.com/joeblackwaslike/cc-recall/commit/d7353e42a3e3005fa3064e686c7a6571c1248e10))
+
 ## [0.2.2](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.2.1...cc-recall-v0.2.2) (2026-08-14)
 
 
