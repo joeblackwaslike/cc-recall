@@ -32,7 +32,11 @@ export const spawnWindowMs = (): number =>
 const incidentsFile = (): string => path.join(metricsDir(), 'incidents.jsonl');
 
 /** Append a structured incident record, mirroring ops/watchdog/bin/lib.sh's `incident()` shape. */
-const logIncident = (kind: string, message: string, extra: Record<string, unknown>): void => {
+export const logIncident = (
+  kind: string,
+  message: string,
+  extra: Record<string, unknown>,
+): void => {
   const dir = metricsDir();
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const record = { t: new Date().toISOString(), kind, msg: message, ...extra };
