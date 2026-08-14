@@ -98,6 +98,35 @@ describe('parseTranscriptText', () => {
     expect(parsed.firstUserPrompt?.text).toContain('# Handoff');
   });
 
+  // firstUserPromptRaw exists specifically so isIndexerTranscript() can see a promptSource:
+  // 'sdk' record (cc-recall-hie) -- confirm it isn't filtered the way firstUserPrompt is.
+  it('captures firstUserPromptRaw unfiltered by promptSource, unlike firstUserPrompt', () => {
+    const parsed = parseTranscriptText(transcript);
+    expect(parsed.firstUserPromptRaw).toContain('# Handoff');
+  });
+
+  // messageText() trims, so a whitespace-only record's text is '' -- rawUserText() must treat
+  // that as absent (not "found"), or an empty leading record permanently blanks the field and
+  // a real prompt later in the same transcript (e.g. the indexer signature) is never captured.
+  it('skips a whitespace-only leading record when deriving firstUserPromptRaw', () => {
+    const withBlankLead = [
+      JSON.stringify({
+        type: 'user',
+        sessionId: 's-blank',
+        timestamp: '2026-06-10T00:00:00.000Z',
+        message: { role: 'user', content: [{ type: 'text', text: '   \n  ' }] },
+      }),
+      JSON.stringify({
+        type: 'user',
+        sessionId: 's-blank',
+        timestamp: '2026-06-10T00:00:01.000Z',
+        message: { role: 'user', content: [{ type: 'text', text: 'real content' }] },
+      }),
+    ].join('\n');
+    const parsed = parseTranscriptText(withBlankLead);
+    expect(parsed.firstUserPromptRaw).toBe('real content');
+  });
+
   it('counts unparseable lines without throwing', () => {
     const parsed = parseTranscriptText(`${transcript}\nnot json\n{"type":"x"`);
     expect(parsed.parseErrors).toBe(2);

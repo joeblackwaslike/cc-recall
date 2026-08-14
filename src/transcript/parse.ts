@@ -106,7 +106,7 @@ const rawUserText = (record: BaseRecord): string | undefined => {
   const parts = contentParts(record.message);
   if (parts.some((p) => isToolResultPart(p))) return undefined;
   if (parts.every((p) => !isTextPart(p))) return undefined;
-  return messageText(record.message);
+  return messageText(record.message) || undefined;
 };
 
 interface TranscriptScan {
