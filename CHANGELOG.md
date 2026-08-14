@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.2.1...cc-recall-v0.2.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* **indexer:** stop indexer's own headless sessions re-entering enrichment ([#68](https://github.com/joeblackwaslike/cc-recall/issues/68)) ([e15f9c4](https://github.com/joeblackwaslike/cc-recall/commit/e15f9c43e1df06333a66c89d8f538b7b67759391))
+
 ## [0.2.1](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.2.0...cc-recall-v0.2.1) (2026-08-11)
 
 
