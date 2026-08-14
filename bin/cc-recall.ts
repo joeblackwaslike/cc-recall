@@ -23,6 +23,7 @@ import { verifyClaudeMemG0 } from '../src/surfaces/claude-mem.js';
 import { defaultFrontPagePath, writeFrontPage } from '../src/surfaces/native-memory.js';
 import { openSidecar } from '../src/surfaces/sidecar.js';
 import { didRevertTranscript } from '../src/surfaces/transcript-writer.js';
+import { checkWatchdogInstalled } from '../src/surfaces/watchdog.js';
 import { parseTranscriptText } from '../src/transcript/parse.js';
 
 const PCT = 100;
@@ -256,6 +257,14 @@ const runDoctor = async (options: { db: string }): Promise<void> => {
     g0.pass
       ? `claude-mem G0: PASS — ${g0.detail} (v${g0.health.version ?? '?'})`
       : `claude-mem G0: FAIL — ${g0.detail} (surface ③ stays disabled — sidecar unaffected)`,
+  );
+  // Present in the repo is not the same claim as running on this machine (cc-recall-hie) —
+  // the independent watchdog needs its own liveness check, not just install.sh having run once.
+  const watchdog = checkWatchdogInstalled();
+  out(
+    watchdog.installed
+      ? `cc-recall-watchdog: installed (${watchdog.label})`
+      : 'cc-recall-watchdog: NOT installed — independent spawn-rate/sidecar-growth observer is not running (run ops/cc-recall-watchdog/install.sh)',
   );
 };
 
