@@ -101,12 +101,13 @@ const ONE_HOUR_MS = MINUTES_PER_HOUR * SECONDS_PER_MINUTE * 1000;
 const invocation = (model: string): string[] => ['-p', '--model', model];
 const REAL_PROJECT_DIR = '-Users-joe-proj';
 
-const transcriptOf = (sessionId: string, firstPrompt: string): string =>
+const transcriptOf = (sessionId: string, firstPrompt: string, promptSource?: string): string =>
   `${JSON.stringify({
     type: 'user',
     sessionId,
     cwd: '/Users/joe/proj',
     timestamp: '2026-01-01T00:00:00.000Z',
+    ...(promptSource && { promptSource }),
     message: { role: 'user', content: [{ type: 'text', text: firstPrompt }] },
   })}\n`;
 
@@ -299,6 +300,47 @@ describe('corpus exclusion and convergence', () => {
     // Assert it was actively skipped and nothing failed, so the test stays diagnostic.
     expect(second.failed).toBe(0);
     expect(second.skipped).toBe(2); // the pre-existing real session, plus the stray enrichment run
+  });
+});
+
+describe('self-recognition guard (cc-recall-hie)', () => {
+  let root: string;
+  let baseDir: string;
+  let sidecar: ReturnType<typeof openSidecar>;
+
+  beforeEach(() => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-iso-sdk-'));
+    root = path.join(tmp, 'projects');
+    baseDir = path.join(tmp, 'base');
+    mkdirSync(path.join(root, INDEXER_PROJECT_DIR), { recursive: true });
+    sidecar = openSidecar(':memory:');
+  });
+  afterEach(() => {
+    sidecar.close();
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  // Reproduces cc-recall-hie: `runClaudeHeadless` invokes `claude -p`, and Claude Code tags
+  // that prompt's own transcript record `promptSource: 'sdk'` (confirmed against a real
+  // on-disk transcript). `genuinePrompt()` (src/transcript/parse.ts) filters out any record
+  // with `promptSource: 'sdk'`, so `parsed.firstUserPrompt` -- what `isIndexerTranscript()`
+  // above actually reads -- comes back `undefined` for every one of the indexer's own
+  // transcripts, silently defeating this guard for real headless runs even though it passes
+  // for the plain fixture elsewhere in this file.
+  it("skips the indexer's own transcript even though claude -p tags its prompt promptSource: sdk", async () => {
+    const file = path.join(root, INDEXER_PROJECT_DIR, 'own-run-sdk.jsonl');
+    writeFileSync(file, transcriptOf('own-run-sdk', INDEXER_PROMPT, 'sdk'));
+    let wasCalled = false;
+    const result = await indexSession(file, sidecar, {
+      baseDir,
+      llm: () => {
+        wasCalled = true;
+        return Promise.resolve(ENRICHMENT_JSON);
+      },
+    });
+    expect(wasCalled).toBe(false);
+    expect(result.skipped).toBe(true);
+    expect(result.written).toBe(false);
   });
 });
 

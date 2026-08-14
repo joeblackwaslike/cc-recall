@@ -175,7 +175,7 @@ export const indexSession = async (
   // Enrichment runs predating the dedicated indexer cwd are scattered across real project
   // dirs, so the dir-level skip cannot catch them. Recognize them by prompt and drop them:
   // indexing our own output yields no retrievable session and feeds the corpus back to itself.
-  if (isIndexerTranscript(parsed.firstUserPrompt?.text)) {
+  if (isIndexerTranscript(parsed.firstUserPromptRaw)) {
     return { sessionId: parsed.sessionId, title: '(indexer run)', written: false, skipped: true };
   }
 

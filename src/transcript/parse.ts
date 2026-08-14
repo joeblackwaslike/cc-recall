@@ -40,6 +40,15 @@ export interface ParsedTranscript {
   lastPrompt: string | undefined;
   genuineUserPrompts: UserPrompt[];
   firstUserPrompt: UserPrompt | undefined;
+  /**
+   * Raw text of the first user record carrying real text content, unfiltered by
+   * `promptSource`/`isMeta`/`isSidechain` — unlike `firstUserPrompt`, which excludes those for
+   * titling/search purposes. `isIndexerTranscript()` needs this: a `claude -p` headless
+   * enrichment run's own prompt is tagged `promptSource: 'sdk'` by Claude Code, so reading from
+   * the filtered field made the indexer permanently invisible to its own self-recognition check
+   * (cc-recall-hie).
+   */
+  firstUserPromptRaw: string | undefined;
 }
 
 const isRecord = (value: unknown): value is BaseRecord =>
@@ -91,11 +100,21 @@ const genuinePrompt = (record: BaseRecord): UserPrompt | undefined => {
   };
 };
 
+/** Same text/tool-result filtering as `genuinePrompt`, minus the source/meta/sidechain checks. */
+const rawUserText = (record: BaseRecord): string | undefined => {
+  if (!isUserRecord(record)) return undefined;
+  const parts = contentParts(record.message);
+  if (parts.some((p) => isToolResultPart(p))) return undefined;
+  if (parts.every((p) => !isTextPart(p))) return undefined;
+  return messageText(record.message);
+};
+
 interface TranscriptScan {
   timestamps: string[];
   cwds: string[];
   branches: string[];
   genuineUserPrompts: UserPrompt[];
+  firstUserPromptRaw: string | undefined;
   aiTitle: string | undefined;
   lastPrompt: string | undefined;
   sessionId: string | undefined;
@@ -119,6 +138,13 @@ const parseLines = (text: string): { records: BaseRecord[]; parseErrors: number 
   return { records, parseErrors };
 };
 
+/** Set `firstUserPromptRaw` once, to the first record that yields raw text. */
+const captureFirstUserPromptRaw = (scan: TranscriptScan, record: BaseRecord): void => {
+  if (scan.firstUserPromptRaw !== undefined) return;
+  const raw = rawUserText(record);
+  if (raw !== undefined) scan.firstUserPromptRaw = raw;
+};
+
 /** Fold a single record into the running scan accumulator. */
 const applyRecord = (scan: TranscriptScan, record: BaseRecord): void => {
   if (typeof record.timestamp === 'string') scan.timestamps.push(record.timestamp);
@@ -131,6 +157,7 @@ const applyRecord = (scan: TranscriptScan, record: BaseRecord): void => {
   if (isLastPromptRecord(record)) scan.lastPrompt = record.lastPrompt;
   const prompt = genuinePrompt(record);
   if (prompt) scan.genuineUserPrompts.push(prompt);
+  captureFirstUserPromptRaw(scan, record);
 };
 
 /** Single pass over records collecting the fields we derive metadata from. */
@@ -140,6 +167,7 @@ const scanRecords = (records: readonly BaseRecord[]): TranscriptScan => {
     cwds: [],
     branches: [],
     genuineUserPrompts: [],
+    firstUserPromptRaw: undefined,
     aiTitle: undefined,
     lastPrompt: undefined,
     sessionId: undefined,
@@ -170,6 +198,7 @@ export const parseTranscriptText = (text: string, filePath?: string): ParsedTran
     lastPrompt: scan.lastPrompt,
     genuineUserPrompts: scan.genuineUserPrompts,
     firstUserPrompt: scan.genuineUserPrompts[0],
+    firstUserPromptRaw: scan.firstUserPromptRaw,
   };
 };
 
