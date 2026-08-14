@@ -9,6 +9,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { logIncident } from './metrics/spawn-ceiling.js';
 import type { Provenance, RecallRecord } from './record/schema.js';
 import {
   INDEXER_CWD,
@@ -164,6 +165,37 @@ const writeToTranscript = (
   return write;
 };
 
+/**
+ * Two independent signals, not one. `runClaudeHeadless` always pins `cwd: INDEXER_CWD`, so any
+ * transcript found there is structurally guaranteed to be one of cc-recall's own enrichment
+ * runs — not a heuristic, a fact about how the subprocess is spawned. The prompt check remains
+ * necessary on its own for historical stray transcripts predating the dedicated cwd, which
+ * scattered into real project dirs and so can't be caught by directory alone.
+ *
+ * A transcript inside the dedicated cwd that the prompt heuristic didn't recognize is never a
+ * normal case — it means the heuristic is wrong, silently, which is exactly how cc-recall-hie
+ * stayed live for weeks. Loud, not silent. (The reverse — prompt matches outside the dedicated
+ * cwd — is the expected historical-stray case and must not be flagged as a mismatch.)
+ */
+const isIndexerRun = (
+  project: string,
+  promptRaw: string | undefined,
+  sessionId: string,
+): boolean => {
+  const isDirMatch = project === INDEXER_PROJECT_DIR;
+  const isPromptMatch = isIndexerTranscript(promptRaw);
+
+  if (isDirMatch && !isPromptMatch) {
+    logIncident(
+      'indexer_recognition_mismatch',
+      'transcript inside the indexer cwd was not recognized by the prompt-signature check',
+      { sessionId, project },
+    );
+  }
+
+  return isDirMatch || isPromptMatch;
+};
+
 export const indexSession = async (
   filePath: string,
   sidecar: Sidecar,
@@ -171,11 +203,9 @@ export const indexSession = async (
 ): Promise<IndexResult> => {
   const text = readFileSync(filePath, 'utf8');
   const parsed = parseTranscriptText(text, filePath);
+  const project = projectFromPath(filePath);
 
-  // Enrichment runs predating the dedicated indexer cwd are scattered across real project
-  // dirs, so the dir-level skip cannot catch them. Recognize them by prompt and drop them:
-  // indexing our own output yields no retrievable session and feeds the corpus back to itself.
-  if (isIndexerTranscript(parsed.firstUserPromptRaw)) {
+  if (isIndexerRun(project, parsed.firstUserPromptRaw, parsed.sessionId)) {
     return { sessionId: parsed.sessionId, title: '(indexer run)', written: false, skipped: true };
   }
 
@@ -201,7 +231,7 @@ export const indexSession = async (
 
   const input = {
     parsed,
-    project: projectFromPath(filePath),
+    project,
     provenance: options.provenance ?? ('backfill' satisfies Provenance),
   };
   const record: RecallRecord = await synthesize(input, synthOptionsFrom(options));
