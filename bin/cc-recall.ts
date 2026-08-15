@@ -20,6 +20,7 @@ import {
 import { logSearchQuery, readAdoptionMetrics } from '../src/metrics/adoption.js';
 import { migrateHomePaths, revertHomePaths } from '../src/migrate/home-path.js';
 import { verifyClaudeMemG0 } from '../src/surfaces/claude-mem.js';
+import { verifyDeployedPlugin } from '../src/surfaces/deploy-verify.js';
 import { defaultFrontPagePath, writeFrontPage } from '../src/surfaces/native-memory.js';
 import { openSidecar } from '../src/surfaces/sidecar.js';
 import { didRevertTranscript } from '../src/surfaces/transcript-writer.js';
@@ -265,6 +266,11 @@ const runDoctor = async (options: { db: string }): Promise<void> => {
     watchdog.installed
       ? `cc-recall-watchdog: installed (${watchdog.label})`
       : 'cc-recall-watchdog: NOT installed — independent spawn-rate/sidecar-growth observer is not running (run ops/cc-recall-watchdog/install.sh)',
+  );
+  const deploy = verifyDeployedPlugin();
+  if (!deploy.pass) process.exitCode = 1;
+  out(
+    deploy.pass ? `deployment: OK — ${deploy.detail}` : `deployment: MISMATCH — ${deploy.detail}`,
   );
 };
 
