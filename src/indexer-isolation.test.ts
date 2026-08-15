@@ -98,7 +98,14 @@ const SECONDS_PER_MINUTE = 60;
 const ONE_HOUR_MS = MINUTES_PER_HOUR * SECONDS_PER_MINUTE * 1000;
 
 /** The argv `runClaudeHeadless` should produce for a given model. */
-const invocation = (model: string): string[] => ['-p', '--model', model];
+const invocation = (model: string): string[] => [
+  '-p',
+  '--model',
+  model,
+  '--setting-sources',
+  '',
+  '--no-session-persistence',
+];
 const REAL_PROJECT_DIR = '-Users-joe-proj';
 
 const transcriptOf = (sessionId: string, firstPrompt: string, promptSource?: string): string =>
