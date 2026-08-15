@@ -12,7 +12,7 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/generate-release-manifest.mjs",
     "dev": "tsx src/index.ts",
     "test": "vitest",
     "test:watch": "vitest --watch",
