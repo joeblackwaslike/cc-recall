@@ -36,9 +36,23 @@ interface ReleaseManifest {
 export const defaultInstalledPluginsPath = (): string =>
   path.join(homedir(), '.claude', 'plugins', 'installed_plugins.json');
 
-const readInstalledEntry = (installedPluginsPath: string): InstalledPluginEntry | undefined => {
-  const raw = JSON.parse(readFileSync(installedPluginsPath, 'utf8')) as InstalledPluginsFile;
-  return raw.plugins?.[PLUGIN_ID]?.[0];
+interface InstalledEntryResult {
+  entry?: InstalledPluginEntry | undefined;
+  parseError?: string;
+}
+
+const readInstalledEntry = (installedPluginsPath: string): InstalledEntryResult => {
+  let raw: InstalledPluginsFile;
+  try {
+    raw = JSON.parse(readFileSync(installedPluginsPath, 'utf8')) as InstalledPluginsFile;
+  } catch (error) {
+    return {
+      parseError: `installed_plugins.json is not valid JSON — ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  // cc-recall is installed at a single scope in practice, so only the first install-scope entry
+  // is inspected — a second entry (e.g. project-scoped alongside user-scoped) is silently ignored.
+  return { entry: raw.plugins?.[PLUGIN_ID]?.[0] };
 };
 
 const findHashMismatches = (distributionDir: string, manifest: ReleaseManifest): string[] => {
@@ -60,6 +74,12 @@ const notInstalled = (): DeployVerifyResult => ({
   detail: 'not installed via marketplace — nothing to verify',
 });
 
+const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const pluralize = (count: number, noun: string): string =>
+  `${count} ${noun}${count === 1 ? '' : 's'}`;
+
 /**
  * Verify the installed cc-recall plugin cache matches the release manifest it shipped with.
  * `pass: true` covers both "verified clean" and "not applicable" (not installed via the
@@ -70,7 +90,8 @@ export const verifyDeployedPlugin = (
 ): DeployVerifyResult => {
   if (!existsSync(installedPluginsPath)) return notInstalled();
 
-  const entry = readInstalledEntry(installedPluginsPath);
+  const { entry, parseError } = readInstalledEntry(installedPluginsPath);
+  if (parseError) return { pass: false, detail: parseError };
   if (!entry) return notInstalled();
 
   const distributionDir = path.join(entry.installPath, 'dist');
@@ -83,11 +104,30 @@ export const verifyDeployedPlugin = (
     };
   }
 
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as ReleaseManifest;
+  let manifest: ReleaseManifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as ReleaseManifest;
+  } catch (error) {
+    return {
+      pass: false,
+      detail: `release-manifest.json is not valid JSON — ${error instanceof Error ? error.message : String(error)}`,
+      installedVersion: entry.version,
+    };
+  }
+
   if (manifest.version !== entry.version) {
     return {
       pass: false,
       detail: `installed_plugins.json reports version ${entry.version} but the shipped manifest says ${manifest.version} — self-deploy updated metadata without replacing files`,
+      installedVersion: entry.version,
+      manifestVersion: manifest.version,
+    };
+  }
+
+  if (!isPlainObject(manifest.files)) {
+    return {
+      pass: false,
+      detail: 'release-manifest.json is malformed — "files" is missing or not an object',
       installedVersion: entry.version,
       manifestVersion: manifest.version,
     };
@@ -106,7 +146,7 @@ export const verifyDeployedPlugin = (
 
   return {
     pass: true,
-    detail: `installed cache (v${entry.version}) matches its release manifest — ${Object.keys(manifest.files).length} files verified`,
+    detail: `installed cache (v${entry.version}) matches its release manifest — ${pluralize(Object.keys(manifest.files).length, 'file')} verified`,
     installedVersion: entry.version,
     manifestVersion: manifest.version,
   };
