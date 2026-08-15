@@ -158,4 +158,36 @@ describe('verifyDeployedPlugin malformed input handling', () => {
     expect(result.pass).toBe(false);
     expect(result.mismatches).toEqual([`${BIN_JS}: missing`]);
   });
+
+  it('fails without throwing when the matched entry has no installPath', () => {
+    writeFileSync(
+      fixture.installedPluginsPath,
+      JSON.stringify({
+        version: '1.0.0',
+        plugins: { [PLUGIN_ID]: [{ version: '1.0.0' }] },
+      }),
+    );
+    let result: ReturnType<typeof verifyDeployedPlugin> | undefined;
+    expect(() => {
+      result = verifyDeployedPlugin(fixture.installedPluginsPath);
+    }).not.toThrow();
+    expect(result?.pass).toBe(false);
+    expect(result?.detail).toMatch(/missing installPath/);
+  });
+
+  it('fails without throwing when the matched entry has no version', () => {
+    writeFileSync(
+      fixture.installedPluginsPath,
+      JSON.stringify({
+        version: '1.0.0',
+        plugins: { [PLUGIN_ID]: [{ installPath: fixture.installPath }] },
+      }),
+    );
+    let result: ReturnType<typeof verifyDeployedPlugin> | undefined;
+    expect(() => {
+      result = verifyDeployedPlugin(fixture.installedPluginsPath);
+    }).not.toThrow();
+    expect(result?.pass).toBe(false);
+    expect(result?.detail).toMatch(/missing version/);
+  });
 });

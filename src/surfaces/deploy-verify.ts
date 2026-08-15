@@ -77,8 +77,53 @@ const notInstalled = (): DeployVerifyResult => ({
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0;
+
 const pluralize = (count: number, noun: string): string =>
   `${count} ${noun}${count === 1 ? '' : 's'}`;
+
+/**
+ * `readInstalledEntry` casts the parsed JSON with no runtime validation, so a matched entry's
+ * fields can be anything the JSON on disk happens to contain (schema drift, a manual edit, a
+ * write that died mid-way). Validate the fields this module actually dereferences before they
+ * reach `path.join` or a version comparison.
+ */
+const findEntryShapeError = (entry: InstalledPluginEntry): string | undefined => {
+  if (!isNonEmptyString(entry.installPath)) {
+    return `installed_plugins.json entry for ${PLUGIN_ID} is missing installPath`;
+  }
+  if (!isNonEmptyString(entry.version)) {
+    return `installed_plugins.json entry for ${PLUGIN_ID} is missing version`;
+  }
+  return undefined;
+};
+
+type ResolvedEntry = { entry: InstalledPluginEntry } | { result: DeployVerifyResult };
+
+/**
+ * Reads and shape-validates the matched `installed_plugins.json` entry, collapsing the "not
+ * installed" / "not valid JSON" / "malformed entry" outcomes into a single early-return result
+ * so callers only need to branch on whether a usable entry came back.
+ */
+const resolveInstalledEntry = (installedPluginsPath: string): ResolvedEntry => {
+  const { entry, parseError } = readInstalledEntry(installedPluginsPath);
+  if (parseError) return { result: { pass: false, detail: parseError } };
+  if (!entry) return { result: notInstalled() };
+
+  const shapeError = findEntryShapeError(entry);
+  if (shapeError) {
+    return {
+      result: {
+        pass: false,
+        detail: shapeError,
+        ...(isNonEmptyString(entry.version) && { installedVersion: entry.version }),
+      },
+    };
+  }
+
+  return { entry };
+};
 
 /**
  * Verify the installed cc-recall plugin cache matches the release manifest it shipped with.
@@ -90,9 +135,9 @@ export const verifyDeployedPlugin = (
 ): DeployVerifyResult => {
   if (!existsSync(installedPluginsPath)) return notInstalled();
 
-  const { entry, parseError } = readInstalledEntry(installedPluginsPath);
-  if (parseError) return { pass: false, detail: parseError };
-  if (!entry) return notInstalled();
+  const resolved = resolveInstalledEntry(installedPluginsPath);
+  if ('result' in resolved) return resolved.result;
+  const { entry } = resolved;
 
   const distributionDir = path.join(entry.installPath, 'dist');
   const manifestPath = path.join(distributionDir, 'release-manifest.json');
