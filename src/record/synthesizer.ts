@@ -308,11 +308,16 @@ export type LlmRunner = (prompt: string) => Promise<string>;
 export const runClaudeHeadless: LlmRunner = (prompt) =>
   new Promise<string>((resolve, reject) => {
     mkdirSync(INDEXER_CWD, { recursive: true });
-    // eslint-disable-next-line sonarjs/no-os-command-from-path -- intentionally invoke the user's installed `claude` CLI via PATH
-    const child = spawn('claude', ['-p', '--model', indexerModel()], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      cwd: INDEXER_CWD,
-    });
+    /* eslint-disable sonarjs/no-os-command-from-path -- intentionally invoke the user's installed `claude` CLI via PATH */
+    const child = spawn(
+      'claude',
+      ['-p', '--model', indexerModel(), '--setting-sources', '', '--no-session-persistence'],
+      {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        cwd: INDEXER_CWD,
+      },
+    );
+    /* eslint-enable sonarjs/no-os-command-from-path */
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
