@@ -119,6 +119,54 @@ separate, cross-plugin effort), cc-recall loses its only signal independent of i
 That is an accepted, bounded window given the validation gate — not a silent regression — and is
 called out explicitly here so it isn't rediscovered as a surprise later.
 
+## Phase D — Historical Ghost Session Cleanup
+
+Included in this spec (revising the earlier "leave them for now" call from before this session
+had the full PM-005 numbers) — the pieces-memory ghosts and cc-recall's own pre-dedicated-CWD
+ghosts are both cc-recall's problem, and this spec is already building the classification
+knowledge to identify them.
+
+**Scope:** cc-recall's own surfaces only — the sidecar (`index.db`) and the session-transcript
+files cc-recall is responsible for. claude-mem-side cleanup (`sdk_sessions`, `observations`,
+chroma embeddings) is `pieces-dev`/claude-mem's own D6 deliverable per PM-005's plan — a different
+system, not this spec's.
+
+Two ghost populations, both confirmed this session:
+
+1. **Pieces-memory extractor ghosts** — scattered across ~55 real project directories. ~781
+   transcripts, ~191MB, matching "background memory extractor" (grep-confirmed this session;
+   PM-005's own broader classification independently found ~779 in the same range).
+2. **cc-recall's own v0.1.0 indexer ghosts** — the `-` project directory
+   (`~/.claude/projects/-/`), 31,156 JSONL files / 31,943 session directories at 4.0 GB, from
+   before `INDEXER_CWD` was dedicated (CWD `/` encodes to project dir `-`).
+
+**Deliverables:**
+
+- A classification script (one-off — lives in scratchpad/tooling, not a maintained cc-recall
+  module) that scans `~/.claude/projects/` and tags each transcript: `pieces-memory-ghost`
+  (contains "background memory extractor"), `cc-recall-indexer-ghost` (starts with the indexer
+  prompt signature — inline the string directly in the script; don't depend on the `src/` export,
+  which Phase B may have already deleted by the time this runs), or `real` (untouched). Output a
+  manifest (session ID, pattern, project dir, path) before any destructive action.
+- Sample-validate before acting: for `cc-recall-indexer-ghost` specifically, check a
+  statistically representative sample (100+, not the first 10) against actual transcript content,
+  not just the opening-prompt match — the `-` directory's size makes a classification bug there
+  expensive to get wrong.
+- **Sidecar cleanup:** back up `~/.claude/cc-recall/index.db` first (timestamped copy). Delete
+  matching entries by session ID from the manifest. `VACUUM`. Record before/after session counts.
+- **Transcript cleanup — quarantine, not delete:** move (not `rm`) matched ghost transcript
+  files/directories into `~/.claude/cc-recall-noise-quarantine/` — an existing location already
+  established for exactly this, reused rather than reinvented. Nothing is permanently destroyed;
+  the manifest is the record of what moved and why. Joe can prune the quarantine by hand once
+  satisfied, or restore anything the classification got wrong.
+- Re-run `cc-recall doctor` after cleanup: coverage percentage should rise (ghost transcripts no
+  longer inflate the denominator once quarantined out of `listTranscripts`' scan).
+
+**Sequencing:** independent of Phase A/B/C — no new ghosts have been forming since the pieces-dev
+hook was disabled and cc-recall's dedicated CWD already contains its own runs, so this can run
+any time. Not eligible for the Docs-Only Override (it's a real script performing data
+modification, even though reversible) — gets its own `writing-plans` pass like Phase A.
+
 ## Testing
 
 Standard TDD per this repo's Tier 1 gate — red before green, stated explicitly in each PR:
@@ -163,15 +211,24 @@ already documents the install/update/cache lifecycle), as a new subsection:
    `doctor` failure. Rides the plugin's own `SessionStart` hook rather than a separate daemon —
    no `launchctl` install/maintain burden.
 
-**Scope for this spec:** cc-recall is the flagship adopter — add this as a fourth check in
-`cc-recall doctor` (alongside sidecar/coverage/G0) and/or a `SessionStart`-adjacent self-check,
-proving the pattern before it becomes a documented recommendation for other plugins in this
-ecosystem. Retrofitting agent-skills, lessons-learned, safety-net, etc. is real follow-on work,
-same shape as the Phase 6 cross-repo rollout below — noted, not done here.
+**Deliverables (committed, not just described — cc-recall is the flagship adopter):**
 
-**Also update:** sharpen the existing `marketplace-publishing` bullet in `claude-extras.md` to
-mention deployment verification explicitly, so this is discoverable from the one place that
-already routes marketplace questions — not a second pointer.
+- Add a fourth check to `cc-recall doctor` (alongside sidecar/coverage/G0): compare
+  `installed_plugins.json`'s `version`/`installPath` for `cc-recall@agent-marketplace` against a
+  release-time manifest of fix-critical files + content hashes; report pass/fail like the
+  existing three checks.
+- Add the cooldown-gated `SessionStart`-adjacent self-check described above, wired into cc-recall's
+  own hook, as the reference implementation of the pattern.
+- Add the new subsection to the `marketplace-publishing` skill: the manual verification runbook
+  and the automated self-verification pattern, written up in full (not summarized).
+- Sharpen the existing `marketplace-publishing` bullet in `claude-extras.md` to mention deployment
+  verification explicitly, so this is discoverable from the one place that already routes
+  marketplace questions.
+
+Retrofitting agent-skills, lessons-learned, safety-net, etc. with the same self-check is real
+follow-on work, same shape as the Phase 6 cross-repo rollout below — noted, not done here. That's
+a scope boundary (which repos), not a hedge on whether cc-recall's own four deliverables above
+ship.
 
 ## Phase 6 Impact & Design Guidance (`cc-recall-nfb`)
 
@@ -215,8 +272,8 @@ completely intact. What's added is a second mode on the same tool:
 - Rewriting Phase 6 itself, or any other project's spec — guidance only, captured for later.
 - Retrofitting the isolation pattern or self-verification check into any plugin other than
   cc-recall as part of this spec.
-- The deferred historical-ghost session cleanup (already explicitly declined by the user in an
-  earlier session) — out of scope here, independent of this spec.
+- claude-mem-side ghost record cleanup (`sdk_sessions`/`observations`/chroma embeddings) —
+  `pieces-dev`'s own D6 deliverable, a different system.
 - Reviving or modifying `pieces-dev`'s hook — already fixed there, referenced only as prior art.
 
 ## Implementation Sequencing
@@ -224,16 +281,36 @@ completely intact. What's added is a second mode on the same tool:
 This spec spans work at different readiness levels — flagged here so the follow-on
 `writing-plans` pass scopes correctly rather than trying to plan gated work prematurely:
 
-- **Ready to plan and implement now:** Phase A (isolation flags + red/green test), the
-  `cc-recall doctor` fourth check (self-verification, real code + tests), and the
-  `marketplace-publishing`/`claude-extras.md` docs edits (docs-only — per the Docs-Only Override,
-  these execute directly, no plan needed).
+- **Ready to plan and implement now:** Phase A (isolation flags + red/green test), Phase D
+  (historical ghost cleanup — independent of A/B/C, gets its own plan), the `cc-recall doctor`
+  fourth check (self-verification, real code + tests), and the `marketplace-publishing`/
+  `claude-extras.md` docs edits (docs-only — per the Docs-Only Override, these execute directly,
+  no plan needed).
 - **Gated, not planned yet:** Phase B (waits on the real-usage verification bar) and Phase C
   (waits on Phase B shipping, plus one final watchdog cycle). These get their own short plan
   once their trigger condition is actually met — writing a plan for them now would be planning
   against an unverified assumption.
 - **Deferred, out of scope for planning:** the Phase 6 guidance is for whoever brainstorms that
   work separately, not an input to this spec's implementation plan.
+
+**Tracking, so gated/deferred work isn't forgotten once Phase A ships:** every phase and
+deferred item in this spec has its own bd issue, filed under epic `cc-recall-5fd` — prose in a
+spec is exactly what the Process Improvements section was originally guilty of (described, not
+committed):
+
+| Issue | Title | Depends on |
+| --- | --- | --- |
+| `cc-recall-xyr` | Phase A | — |
+| `cc-recall-yhp` | Phase B | `cc-recall-xyr` |
+| `cc-recall-1o9` | Phase C | `cc-recall-yhp` |
+| `cc-recall-1yo` | Phase D | — (independent) |
+| `cc-recall-x35` | Process Improvements | — |
+| `cc-recall-68h` | Fold Phase 6 guidance into `cc-recall-nfb` | `cc-recall-nfb` |
+| `cc-recall-1k6` | Retrofit self-verification to other plugins | `cc-recall-x35` |
+
+Phase B and Phase C are mechanically `blocked` via real `bd dep` edges, not just worded as
+"gated" in prose — `bd ready`/`bd blocked` surfaces them correctly instead of relying on someone
+rereading this spec later.
 
 ## Verification
 
@@ -244,7 +321,12 @@ This spec spans work at different readiness levels — flagged here so the follo
    and the two deleted test files are gone; `tsc --noEmit` clean; full suite green.
 3. Phase C (after Phase B ships and one final watchdog cycle confirms clean signals):
    `launchctl list | grep ccrecall` returns nothing; `ops/cc-recall-watchdog/` removed.
-4. Process Improvements: `cc-recall doctor` reports a fourth check (deployment self-verification);
+4. Phase D: manifest exists and was sample-validated; sidecar backup exists before deletion;
+   `~/.claude/cc-recall-noise-quarantine/` contains the moved transcripts, not `rm`'d; `cc-recall
+   doctor`'s coverage percentage increased.
+5. Process Improvements: `cc-recall doctor` reports a fourth check (deployment self-verification);
    `marketplace-publishing` skill contains the new subsection; `claude-extras.md`'s existing
    bullet mentions deployment verification.
-5. `cc-recall-nfb` bead notes updated to reference this spec's Phase 6 Impact section.
+6. `cc-recall-nfb` bead notes updated to reference this spec's Phase 6 Impact section.
+7. Every phase/deferred item in this spec has a corresponding bd issue (`bd list` shows them);
+   Phase B/C's issues are mechanically `blocked`, not just described as gated in prose.
