@@ -120,7 +120,11 @@ export default tseslint.config(
   {
     // Plain Node scripts (hooks, etc.) are not part of the TS program; lint them
     // without type-aware rules so the type-checked parser does not choke on them.
-    files: ['**/*.{js,cjs,mjs}'],
+    // scripts/**/*.ts and hooks/**/*.ts are included here too: tsconfig.json's `include`
+    // is deliberately limited to `src`/`bin` (scripts/ and hooks/ stay untyped .mjs), so a
+    // *.test.ts file living alongside a script/hook would otherwise fail typescript-eslint's
+    // "file not found in project" check.
+    files: ['**/*.{js,cjs,mjs}', 'scripts/**/*.ts', 'hooks/**/*.ts'],
     ...tseslint.configs.disableTypeChecked,
     languageOptions: {
       parserOptions: { project: false, projectService: false },
@@ -129,6 +133,17 @@ export default tseslint.config(
       ...tseslint.configs.disableTypeChecked.rules,
       // Plain JS (hooks, configs) cannot carry type annotations.
       '@typescript-eslint/explicit-function-return-type': 'off',
+    },
+  },
+  {
+    // scripts/*.mjs and hooks/*.mjs are dual-purpose: a CLI entry point run directly
+    // (`node scripts/x.mjs`, or invoked by the Claude Code harness for hooks/) and an
+    // importable module so Vitest can unit-test the logic without a subprocess.
+    // unicorn/no-exports-in-scripts assumes scripts are never imported; that assumption
+    // doesn't hold for this repo's scripts/ and hooks/ convention.
+    files: ['scripts/**/*.{js,cjs,mjs}', 'hooks/**/*.{js,cjs,mjs}'],
+    rules: {
+      'unicorn/no-exports-in-scripts': 'off',
     },
   },
   {
