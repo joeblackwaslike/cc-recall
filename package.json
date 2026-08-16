@@ -12,7 +12,8 @@
     }
   },
   "scripts": {
-    "build": "tsc && node scripts/generate-release-manifest.mjs",
+    "build": "tsc",
+    "release:manifest": "node scripts/generate-release-manifest.mjs",
     "dev": "tsx src/index.ts",
     "test": "vitest",
     "test:watch": "vitest --watch",

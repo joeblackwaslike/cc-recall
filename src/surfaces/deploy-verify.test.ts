@@ -8,7 +8,9 @@ import { verifyDeployedPlugin } from './deploy-verify.js';
 const PLUGIN_ID = 'cc-recall@agent-marketplace';
 const RELEASE_MANIFEST_FILENAME = 'release-manifest.json';
 const GENERATED_AT = '2026-01-01T00:00:00.000Z';
-const BIN_JS = 'bin.js';
+// Manifest keys are install-root-relative (e.g. "dist/bin.js", "hooks/session-end.mjs"), not
+// dist-relative -- see Finding 2, PR #77 review.
+const BIN_JS = 'dist/bin.js';
 const ORIGINAL_CONTENT = 'original content';
 
 interface Fixture {
@@ -89,7 +91,7 @@ describe('verifyDeployedPlugin', () => {
 
   it('fails and lists mismatches when a file hash no longer matches', () => {
     writeInstalledPlugins(fixture, '1.0.0');
-    writeFileSync(path.join(fixture.installPath, 'dist', BIN_JS), 'tampered content');
+    writeFileSync(path.join(fixture.installPath, BIN_JS), 'tampered content');
     writeReleaseManifest(fixture, '1.0.0', {
       [BIN_JS]: createHash('sha256').update(ORIGINAL_CONTENT).digest('hex'),
     });
@@ -100,7 +102,7 @@ describe('verifyDeployedPlugin', () => {
 
   it('passes when every file hash matches the shipped manifest', () => {
     writeInstalledPlugins(fixture, '1.0.0');
-    writeFileSync(path.join(fixture.installPath, 'dist', BIN_JS), ORIGINAL_CONTENT);
+    writeFileSync(path.join(fixture.installPath, BIN_JS), ORIGINAL_CONTENT);
     writeReleaseManifest(fixture, '1.0.0', {
       [BIN_JS]: createHash('sha256').update(ORIGINAL_CONTENT).digest('hex'),
     });
@@ -139,6 +141,36 @@ describe('verifyDeployedPlugin malformed input handling', () => {
     expect(result.detail).toMatch(/release-manifest\.json is not valid JSON/);
   });
 
+  it('fails without throwing when release-manifest.json contains valid JSON `null`', () => {
+    // JSON.parse('null') succeeds and returns null -- it never throws, so the "not valid JSON"
+    // catch above never fires. Without an explicit non-object guard, `manifest.version` on the
+    // next line throws `TypeError: Cannot read properties of null`.
+    writeInstalledPlugins(fixture, '1.0.0');
+    writeFileSync(path.join(fixture.installPath, 'dist', RELEASE_MANIFEST_FILENAME), 'null');
+    let result: ReturnType<typeof verifyDeployedPlugin> | undefined;
+    expect(() => {
+      result = verifyDeployedPlugin(fixture.installedPluginsPath);
+    }).not.toThrow();
+    expect(result?.pass).toBe(false);
+    expect(result?.detail).toMatch(/does not contain a valid manifest object/);
+  });
+
+  it('fails without throwing when release-manifest.json contains a JSON array', () => {
+    writeInstalledPlugins(fixture, '1.0.0');
+    writeFileSync(path.join(fixture.installPath, 'dist', RELEASE_MANIFEST_FILENAME), '[]');
+    const result = verifyDeployedPlugin(fixture.installedPluginsPath);
+    expect(result.pass).toBe(false);
+    expect(result.detail).toMatch(/does not contain a valid manifest object/);
+  });
+
+  it('fails without throwing when release-manifest.json contains a bare JSON number', () => {
+    writeInstalledPlugins(fixture, '1.0.0');
+    writeFileSync(path.join(fixture.installPath, 'dist', RELEASE_MANIFEST_FILENAME), '42');
+    const result = verifyDeployedPlugin(fixture.installedPluginsPath);
+    expect(result.pass).toBe(false);
+    expect(result.detail).toMatch(/does not contain a valid manifest object/);
+  });
+
   it('fails without throwing when the manifest has no files object', () => {
     writeInstalledPlugins(fixture, '1.0.0');
     writeFileSync(
@@ -147,6 +179,18 @@ describe('verifyDeployedPlugin malformed input handling', () => {
     );
     const result = verifyDeployedPlugin(fixture.installedPluginsPath);
     expect(result.pass).toBe(false);
+  });
+});
+
+describe('verifyDeployedPlugin malformed input handling: entry shape and missing files', () => {
+  let fixture: Fixture;
+
+  beforeEach(() => {
+    fixture = createFixture();
+  });
+
+  afterEach(() => {
+    rmSync(fixture.root, { recursive: true, force: true });
   });
 
   it('lists a manifest-listed file that is missing on disk as a mismatch', () => {

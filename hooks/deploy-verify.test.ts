@@ -10,6 +10,8 @@ const TARGET_FILE = 'bin/cc-recall.js';
 const ACTUAL_CONTENT = 'actual content';
 const STATUS_MANIFEST_MALFORMED = 'manifest-malformed';
 const TMP_DIR_PREFIX = 'cc-recall-deploy-verify-';
+const MANIFEST_RELATIVE_PATH = ['dist', 'release-manifest.json'];
+const BARE_NUMBER_MANIFEST = 42;
 
 const throwEnoent = () => {
   throw new Error('ENOENT');
@@ -67,6 +69,27 @@ describe('decide', () => {
     const result = decide(entry, manifest, () => Buffer.from(ACTUAL_CONTENT));
     expect(result).toEqual({ status: STATUS_MANIFEST_MALFORMED });
   });
+
+  it('reports manifest-malformed (not no-manifest) when the manifest is JSON null', () => {
+    // Regression: `!manifest` treated null the same as "genuinely absent" (undefined), so a
+    // release-manifest.json containing literal `null` silently passed through as no-manifest --
+    // exactly the corrupted-deploy scenario this feature exists to catch.
+    const entry = { version: '1.0.0' };
+    const result = decide(entry, null, () => Buffer.from(ACTUAL_CONTENT));
+    expect(result).toEqual({ status: STATUS_MANIFEST_MALFORMED });
+  });
+
+  it('reports manifest-malformed when the manifest is a bare JSON number', () => {
+    const entry = { version: '1.0.0' };
+    const result = decide(entry, BARE_NUMBER_MANIFEST, () => Buffer.from(ACTUAL_CONTENT));
+    expect(result).toEqual({ status: STATUS_MANIFEST_MALFORMED });
+  });
+
+  it('reports manifest-malformed when the manifest is a JSON array', () => {
+    const entry = { version: '1.0.0' };
+    const result = decide(entry, [], () => Buffer.from(ACTUAL_CONTENT));
+    expect(result).toEqual({ status: STATUS_MANIFEST_MALFORMED });
+  });
 });
 
 describe('runDeployCheck: manifest exists but is corrupt/malformed', () => {
@@ -85,7 +108,7 @@ describe('runDeployCheck: manifest exists but is corrupt/malformed', () => {
   it('reports manifest-invalid (not no-manifest) when release-manifest.json is present but not valid JSON', () => {
     dir = mkdtempSync(path.join(tmpdir(), TMP_DIR_PREFIX));
     mkdirSync(path.join(dir, 'dist'), { recursive: true });
-    writeFileSync(path.join(dir, 'dist', 'release-manifest.json'), 'not valid json {');
+    writeFileSync(path.join(dir, ...MANIFEST_RELATIVE_PATH), 'not valid json {');
 
     const entry = { installPath: dir, version: '1.0.0' };
     const result = runDeployCheck(entry);
@@ -96,10 +119,21 @@ describe('runDeployCheck: manifest exists but is corrupt/malformed', () => {
   it('reports manifest-malformed (not no-manifest) when release-manifest.json is valid JSON but "files" is missing', () => {
     dir = mkdtempSync(path.join(tmpdir(), TMP_DIR_PREFIX));
     mkdirSync(path.join(dir, 'dist'), { recursive: true });
-    writeFileSync(
-      path.join(dir, 'dist', 'release-manifest.json'),
-      JSON.stringify({ version: '1.0.0' }),
-    );
+    writeFileSync(path.join(dir, ...MANIFEST_RELATIVE_PATH), JSON.stringify({ version: '1.0.0' }));
+
+    const entry = { installPath: dir, version: '1.0.0' };
+    const result = runDeployCheck(entry);
+
+    expect(result).toEqual({ status: STATUS_MANIFEST_MALFORMED });
+  });
+
+  it('reports manifest-malformed (not no-manifest) when release-manifest.json is literal JSON null', () => {
+    // Distinct from the "not valid JSON" case above: `null` IS valid JSON, so JSON.parse
+    // succeeds and readJson returns `null` (not undefined) -- must not be mistaken for a
+    // genuinely absent manifest file.
+    dir = mkdtempSync(path.join(tmpdir(), TMP_DIR_PREFIX));
+    mkdirSync(path.join(dir, 'dist'), { recursive: true });
+    writeFileSync(path.join(dir, ...MANIFEST_RELATIVE_PATH), 'null');
 
     const entry = { installPath: dir, version: '1.0.0' };
     const result = runDeployCheck(entry);
@@ -115,6 +149,35 @@ describe('runDeployCheck: manifest exists but is corrupt/malformed', () => {
     const result = runDeployCheck(entry);
 
     expect(result).toEqual({ status: 'no-manifest' });
+  });
+});
+
+describe('runDeployCheck: install-root-relative file resolution', () => {
+  let dir: string;
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('resolves manifest keys against the install root, not dist/, for both dist/ and hooks/ prefixed entries', () => {
+    dir = mkdtempSync(path.join(tmpdir(), TMP_DIR_PREFIX));
+    mkdirSync(path.join(dir, 'dist'), { recursive: true });
+    mkdirSync(path.join(dir, 'hooks'), { recursive: true });
+    writeFileSync(path.join(dir, 'dist', 'bin.js'), ACTUAL_CONTENT);
+    writeFileSync(path.join(dir, 'hooks', 'session-end.mjs'), ACTUAL_CONTENT);
+    const hash = createHash('sha256').update(ACTUAL_CONTENT).digest('hex');
+    writeFileSync(
+      path.join(dir, ...MANIFEST_RELATIVE_PATH),
+      JSON.stringify({
+        version: '1.0.0',
+        files: { 'dist/bin.js': hash, 'hooks/session-end.mjs': hash },
+      }),
+    );
+
+    const entry = { installPath: dir, version: '1.0.0' };
+    const result = runDeployCheck(entry);
+
+    expect(result).toEqual({ status: 'pass' });
   });
 });
 

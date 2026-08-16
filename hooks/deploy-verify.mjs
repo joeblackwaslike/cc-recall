@@ -74,9 +74,15 @@ export const readJson = (filePath) => {
  * is absent. A manifest that exists but fails to parse, or parses but has a malformed `files`
  * key, is a distinct real-problem case and must not collapse into this same no-manifest status
  * (mirrors src/surfaces/deploy-verify.ts's verifyDeployedPlugin, commit dba66b8).
+ *
+ * Valid JSON `null` (or a number/string/array) parses without throwing, so it never reaches the
+ * `undefined` branch above -- `!manifest` used to treat `null` as "genuinely no manifest" too,
+ * silently passing through the exact "truncated mid-deploy write" scenario this feature exists
+ * to catch. Anything that isn't a plain object at this point is malformed, not absent.
  */
 export const decide = (entry, manifest, readFile) => {
-  if (!manifest) return { status: STATUS_NO_MANIFEST };
+  if (manifest === undefined) return { status: STATUS_NO_MANIFEST };
+  if (!isPlainObject(manifest)) return { status: STATUS_MANIFEST_MALFORMED };
   if (manifest.version !== entry.version) {
     return { status: 'version-mismatch', manifestVersion: manifest.version };
   }
@@ -119,8 +125,10 @@ const isAlreadyVerified = (marker, entry) =>
 
 export const runDeployCheck = (entry) => {
   const manifestPath = path.join(entry.installPath, 'dist', 'release-manifest.json');
-  const readFile = (relativePath) =>
-    readFileSync(path.join(entry.installPath, 'dist', relativePath));
+  // relativePath now comes from the manifest's install-root-relative keys (e.g.
+  // "dist/bin/cc-recall.js", "hooks/session-end.mjs") -- it already carries its own dist/ or
+  // hooks/ prefix, so this resolves against the install root, not dist/ directly.
+  const readFile = (relativePath) => readFileSync(path.join(entry.installPath, relativePath));
 
   if (!existsSync(manifestPath)) {
     // Genuinely absent -- predates this feature (older release, or a stale/corrupt build).

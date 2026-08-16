@@ -55,10 +55,10 @@ const readInstalledEntry = (installedPluginsPath: string): InstalledEntryResult 
   return { entry: raw.plugins?.[PLUGIN_ID]?.[0] };
 };
 
-const findHashMismatches = (distributionDir: string, manifest: ReleaseManifest): string[] => {
+const findHashMismatches = (installRoot: string, manifest: ReleaseManifest): string[] => {
   const mismatches: string[] = [];
   for (const [relativePath, expectedHash] of Object.entries(manifest.files)) {
-    const filePath = path.join(distributionDir, relativePath);
+    const filePath = path.join(installRoot, relativePath);
     if (!existsSync(filePath)) {
       mismatches.push(`${relativePath}: missing`);
       continue;
@@ -125,6 +125,42 @@ const resolveInstalledEntry = (installedPluginsPath: string): ResolvedEntry => {
   return { entry };
 };
 
+type ResolvedManifest = { manifest: ReleaseManifest } | { result: DeployVerifyResult };
+
+/**
+ * Reads, parses, and shape-validates release-manifest.json, collapsing the "not valid JSON" and
+ * "valid JSON but not a manifest object" (e.g. a literal `null`, a bare number, an array --
+ * JSON.parse succeeds on all of those without throwing) outcomes into a single early-return
+ * result, mirroring `resolveInstalledEntry` above.
+ */
+const resolveManifest = (manifestPath: string, entry: InstalledPluginEntry): ResolvedManifest => {
+  let parsedManifest: unknown;
+  try {
+    parsedManifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  } catch (error) {
+    return {
+      result: {
+        pass: false,
+        detail: `release-manifest.json is not valid JSON — ${error instanceof Error ? error.message : String(error)}`,
+        installedVersion: entry.version,
+      },
+    };
+  }
+
+  if (!isPlainObject(parsedManifest)) {
+    return {
+      result: {
+        pass: false,
+        detail:
+          'release-manifest.json does not contain a valid manifest object (parsed to null or a non-object value)',
+        installedVersion: entry.version,
+      },
+    };
+  }
+
+  return { manifest: parsedManifest as unknown as ReleaseManifest };
+};
+
 /**
  * Verify the installed cc-recall plugin cache matches the release manifest it shipped with.
  * `pass: true` covers both "verified clean" and "not applicable" (not installed via the
@@ -139,8 +175,7 @@ export const verifyDeployedPlugin = (
   if ('result' in resolved) return resolved.result;
   const { entry } = resolved;
 
-  const distributionDir = path.join(entry.installPath, 'dist');
-  const manifestPath = path.join(distributionDir, 'release-manifest.json');
+  const manifestPath = path.join(entry.installPath, 'dist', 'release-manifest.json');
   if (!existsSync(manifestPath)) {
     return {
       pass: false,
@@ -149,16 +184,9 @@ export const verifyDeployedPlugin = (
     };
   }
 
-  let manifest: ReleaseManifest;
-  try {
-    manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as ReleaseManifest;
-  } catch (error) {
-    return {
-      pass: false,
-      detail: `release-manifest.json is not valid JSON — ${error instanceof Error ? error.message : String(error)}`,
-      installedVersion: entry.version,
-    };
-  }
+  const resolvedManifest = resolveManifest(manifestPath, entry);
+  if ('result' in resolvedManifest) return resolvedManifest.result;
+  const { manifest } = resolvedManifest;
 
   if (manifest.version !== entry.version) {
     return {
@@ -178,7 +206,7 @@ export const verifyDeployedPlugin = (
     };
   }
 
-  const mismatches = findHashMismatches(distributionDir, manifest);
+  const mismatches = findHashMismatches(entry.installPath, manifest);
   if (mismatches.length > 0) {
     return {
       pass: false,
