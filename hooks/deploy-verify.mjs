@@ -24,6 +24,23 @@ const PLUGIN_ID = 'cc-recall@agent-marketplace';
 const STATUS_NO_MANIFEST = 'no-manifest';
 const STATUS_PASS = 'pass';
 
+const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0;
+
+/**
+ * `entry` is whatever `installed_plugins.json` on disk happens to contain for this plugin --
+ * schema drift, a manual edit, or a write that died mid-way (e.g. an interrupted self-deploy)
+ * can all leave it missing fields this module dereferences. Validate before `installPath`
+ * reaches `path.join` (same bug class fixed in src/surfaces/deploy-verify.ts, commit 003e691).
+ */
+export const findEntryShapeError = (entry) => {
+  if (!isNonEmptyString(entry.installPath)) {
+    return `installed_plugins.json entry for ${PLUGIN_ID} is missing installPath`;
+  }
+  if (!isNonEmptyString(entry.version)) {
+    return `installed_plugins.json entry for ${PLUGIN_ID} is missing version`;
+  }
+};
+
 const MARKER_PATH = path.join(
   homedir(),
   '.claude',
@@ -86,11 +103,21 @@ const writeMarker = (version, outcome) => {
 const isAlreadyVerified = (marker, entry) =>
   marker !== undefined && marker.version === entry.version && marker.result === STATUS_PASS;
 
-const runDeployCheck = (entry) => {
+export const runDeployCheck = (entry) => {
   const manifestPath = path.join(entry.installPath, 'dist', 'release-manifest.json');
   const manifest = existsSync(manifestPath) ? readJson(manifestPath) : undefined;
   return decide(entry, manifest, (relativePath) =>
     readFileSync(path.join(entry.installPath, 'dist', relativePath)),
+  );
+};
+
+const reportInvalidEntry = (entry, detail) => {
+  // Only key the marker on a version we can trust; a missing/invalid version means there's
+  // nothing sane to compare against next session, so leave the marker alone rather than write
+  // one that would never satisfy isAlreadyVerified.
+  if (isNonEmptyString(entry.version)) writeMarker(entry.version, 'mismatch');
+  warn(
+    `cc-recall: ${detail} -- the plugin cache metadata may be corrupted. Run: claude plugin update cc-recall`,
   );
 };
 
@@ -121,20 +148,34 @@ const reportResult = (entry, result) => {
 };
 
 const main = () => {
-  const installed = readJson(INSTALLED_PLUGINS_PATH);
-  const entry = installed?.plugins?.[PLUGIN_ID]?.[0];
-  if (!entry) {
-    proceed();
-    return;
-  }
+  // Defense in depth: findEntryShapeError below is the primary fix for the known "malformed
+  // installed_plugins.json entry" case and produces a clean, specific systemMessage for it.
+  // This try/catch is only a safety net for genuinely unexpected failures -- this hook must
+  // never let an uncaught exception escape and surface a raw Node stack trace on session start.
+  try {
+    const installed = readJson(INSTALLED_PLUGINS_PATH);
+    const entry = installed?.plugins?.[PLUGIN_ID]?.[0];
+    if (!entry) {
+      proceed();
+      return;
+    }
 
-  const marker = readJson(MARKER_PATH);
-  if (isAlreadyVerified(marker, entry)) {
-    proceed();
-    return;
-  }
+    const shapeError = findEntryShapeError(entry);
+    if (shapeError) {
+      reportInvalidEntry(entry, shapeError);
+      return;
+    }
 
-  reportResult(entry, runDeployCheck(entry));
+    const marker = readJson(MARKER_PATH);
+    if (isAlreadyVerified(marker, entry)) {
+      proceed();
+      return;
+    }
+
+    reportResult(entry, runDeployCheck(entry));
+  } catch {
+    proceed();
+  }
 };
 
 if (import.meta.url === `file://${process.argv[1]}`) {
