@@ -203,6 +203,23 @@ describe('verifyDeployedPlugin malformed input handling: entry shape and missing
     expect(result.mismatches).toEqual([`${BIN_JS}: missing`]);
   });
 
+  it('lists a manifest-listed path that resolves to a directory as a mismatch, without throwing', () => {
+    // existsSync returns true for a directory, so without a read-failure guard this reaches
+    // readFileSync and throws an uncaught EISDIR -- exactly the corrupted/tampered-manifest
+    // failure mode this feature exists to detect (see findHashMismatches in deploy-verify.ts).
+    writeInstalledPlugins(fixture, '1.0.0');
+    mkdirSync(path.join(fixture.installPath, 'dist', 'not-a-file'));
+    writeReleaseManifest(fixture, '1.0.0', {
+      'dist/not-a-file': createHash('sha256').update(ORIGINAL_CONTENT).digest('hex'),
+    });
+    let result: ReturnType<typeof verifyDeployedPlugin> | undefined;
+    expect(() => {
+      result = verifyDeployedPlugin(fixture.installedPluginsPath);
+    }).not.toThrow();
+    expect(result?.pass).toBe(false);
+    expect(result?.mismatches).toEqual([expect.stringContaining('dist/not-a-file')]);
+  });
+
   it('fails without throwing when the matched entry has no installPath', () => {
     writeFileSync(
       fixture.installedPluginsPath,

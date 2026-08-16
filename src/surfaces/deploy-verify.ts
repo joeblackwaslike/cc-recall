@@ -55,6 +55,14 @@ const readInstalledEntry = (installedPluginsPath: string): InstalledEntryResult 
   return { entry: raw.plugins?.[PLUGIN_ID]?.[0] };
 };
 
+/**
+ * `existsSync` only rules out "nothing there" -- it returns `true` for a directory (or other
+ * non-regular-file entry), so a manifest listing a path that resolves to one (a corrupted or
+ * tampered manifest, exactly the failure mode this feature exists to detect) would otherwise
+ * reach `readFileSync` and throw an uncaught EISDIR straight out of `verifyDeployedPlugin`. The
+ * read is wrapped so ANY read failure -- missing, EISDIR, EACCES, whatever -- degrades to a
+ * reported mismatch instead of crashing, mirroring hooks/deploy-verify.mjs's `decide`.
+ */
 const findHashMismatches = (installRoot: string, manifest: ReleaseManifest): string[] => {
   const mismatches: string[] = [];
   for (const [relativePath, expectedHash] of Object.entries(manifest.files)) {
@@ -63,7 +71,15 @@ const findHashMismatches = (installRoot: string, manifest: ReleaseManifest): str
       mismatches.push(`${relativePath}: missing`);
       continue;
     }
-    const actualHash = createHash('sha256').update(readFileSync(filePath)).digest('hex');
+    let actualHash: string;
+    try {
+      actualHash = createHash('sha256').update(readFileSync(filePath)).digest('hex');
+    } catch (error) {
+      mismatches.push(
+        `${relativePath}: unreadable — ${error instanceof Error ? error.message : String(error)}`,
+      );
+      continue;
+    }
     if (actualHash !== expectedHash) mismatches.push(`${relativePath}: hash mismatch`);
   }
   return mismatches;
