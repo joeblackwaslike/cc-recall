@@ -22,9 +22,14 @@ import path from 'node:path';
 
 const PLUGIN_ID = 'cc-recall@agent-marketplace';
 const STATUS_NO_MANIFEST = 'no-manifest';
+const STATUS_MANIFEST_INVALID = 'manifest-invalid';
+const STATUS_MANIFEST_MALFORMED = 'manifest-malformed';
 const STATUS_PASS = 'pass';
 
 const isNonEmptyString = (value) => typeof value === 'string' && value.length > 0;
+
+const isPlainObject = (value) =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /**
  * `entry` is whatever `installed_plugins.json` on disk happens to contain for this plugin --
@@ -63,14 +68,23 @@ export const readJson = (filePath) => {
  * (both already loaded), decide pass/mismatch/no-manifest and the file-level mismatches, if
  * any. `readFile(relativePath)` is injected so tests can supply fixture bytes without touching
  * disk.
+ *
+ * `manifest === undefined` means "genuinely no manifest file" (predates this feature) --
+ * `runDeployCheck` only passes `undefined` here when `existsSync` already confirmed the file
+ * is absent. A manifest that exists but fails to parse, or parses but has a malformed `files`
+ * key, is a distinct real-problem case and must not collapse into this same no-manifest status
+ * (mirrors src/surfaces/deploy-verify.ts's verifyDeployedPlugin, commit dba66b8).
  */
 export const decide = (entry, manifest, readFile) => {
   if (!manifest) return { status: STATUS_NO_MANIFEST };
   if (manifest.version !== entry.version) {
     return { status: 'version-mismatch', manifestVersion: manifest.version };
   }
+  if (!isPlainObject(manifest.files)) {
+    return { status: STATUS_MANIFEST_MALFORMED };
+  }
   const mismatches = [];
-  const files = Object.entries(manifest.files ?? {});
+  const files = Object.entries(manifest.files);
   for (const [relativePath, expectedHash] of files) {
     let actualHash;
     try {
@@ -105,10 +119,23 @@ const isAlreadyVerified = (marker, entry) =>
 
 export const runDeployCheck = (entry) => {
   const manifestPath = path.join(entry.installPath, 'dist', 'release-manifest.json');
-  const manifest = existsSync(manifestPath) ? readJson(manifestPath) : undefined;
-  return decide(entry, manifest, (relativePath) =>
-    readFileSync(path.join(entry.installPath, 'dist', relativePath)),
-  );
+  const readFile = (relativePath) =>
+    readFileSync(path.join(entry.installPath, 'dist', relativePath));
+
+  if (!existsSync(manifestPath)) {
+    // Genuinely absent -- predates this feature (older release, or a stale/corrupt build).
+    // Harmless by convention, so this is the only case that reaches `decide` with `undefined`.
+    return decide(entry, undefined, readFile);
+  }
+
+  const manifest = readJson(manifestPath);
+  if (manifest === undefined) {
+    // The file exists but readJson's JSON.parse failed -- the exact "truncated mid-deploy
+    // write" scenario this whole feature exists to catch. Must not collapse into no-manifest.
+    return { status: STATUS_MANIFEST_INVALID };
+  }
+
+  return decide(entry, manifest, readFile);
 };
 
 const reportInvalidEntry = (entry, detail) => {
@@ -121,6 +148,20 @@ const reportInvalidEntry = (entry, detail) => {
   );
 };
 
+// Every non-pass, non-"genuinely no manifest" outcome is a real mismatch: same 'mismatch'
+// marker, same systemMessage severity, just a status-specific message. Keyed by result.status
+// so reportResult stays a flat dispatch instead of a long if/else chain.
+const MISMATCH_MESSAGES = {
+  [STATUS_MANIFEST_INVALID]: () =>
+    'cc-recall: release-manifest.json in the installed plugin cache is not valid JSON — the cache may be corrupted. Run: claude plugin update cc-recall',
+  [STATUS_MANIFEST_MALFORMED]: () =>
+    'cc-recall: release-manifest.json in the installed plugin cache is malformed (missing or invalid "files") — the cache may be corrupted. Run: claude plugin update cc-recall',
+  'version-mismatch': (entry, result) =>
+    `cc-recall: installed_plugins.json reports v${entry.version} but the shipped manifest says v${result.manifestVersion} — self-deploy may not have replaced files. Run: claude plugin update cc-recall`,
+  'file-mismatch': (entry, result) =>
+    `cc-recall: ${result.mismatches.length} file(s) in the installed plugin cache don't match its own release manifest (v${entry.version}) — the cache may be corrupted. Run: claude plugin update cc-recall`,
+};
+
 const reportResult = (entry, result) => {
   if (result.status === STATUS_NO_MANIFEST) {
     // Predates this check (older release, or a stale/corrupt build) -- not necessarily a real
@@ -129,22 +170,13 @@ const reportResult = (entry, result) => {
     proceed();
     return;
   }
-  if (result.status === 'version-mismatch') {
-    writeMarker(entry.version, 'mismatch');
-    warn(
-      `cc-recall: installed_plugins.json reports v${entry.version} but the shipped manifest says v${result.manifestVersion} — self-deploy may not have replaced files. Run: claude plugin update cc-recall`,
-    );
+  if (result.status === STATUS_PASS) {
+    writeMarker(entry.version, STATUS_PASS);
+    proceed();
     return;
   }
-  if (result.status === 'file-mismatch') {
-    writeMarker(entry.version, 'mismatch');
-    warn(
-      `cc-recall: ${result.mismatches.length} file(s) in the installed plugin cache don't match its own release manifest (v${entry.version}) — the cache may be corrupted. Run: claude plugin update cc-recall`,
-    );
-    return;
-  }
-  writeMarker(entry.version, STATUS_PASS);
-  proceed();
+  writeMarker(entry.version, 'mismatch');
+  warn(MISMATCH_MESSAGES[result.status](entry, result));
 };
 
 const main = () => {

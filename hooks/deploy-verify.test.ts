@@ -1,10 +1,15 @@
 // hooks/deploy-verify.test.ts
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { decide, findEntryShapeError, runDeployCheck } from './deploy-verify.mjs';
 
 const TARGET_FILE = 'bin/cc-recall.js';
 const ACTUAL_CONTENT = 'actual content';
+const STATUS_MANIFEST_MALFORMED = 'manifest-malformed';
+const TMP_DIR_PREFIX = 'cc-recall-deploy-verify-';
 
 const throwEnoent = () => {
   throw new Error('ENOENT');
@@ -43,6 +48,73 @@ describe('decide', () => {
     const manifest = { version: '1.0.0', files: { [TARGET_FILE]: hash } };
     const result = decide(entry, manifest, () => Buffer.from(ACTUAL_CONTENT));
     expect(result).toEqual({ status: 'pass' });
+  });
+
+  it('reports manifest-malformed (not a silent pass) when a valid manifest is missing "files"', () => {
+    // Regression: manifest.files ?? {} previously made a missing `files` key indistinguishable
+    // from an empty-but-valid file list, so this collapsed into a false "pass" with zero
+    // mismatches checked. That's the same "truncated mid-deploy write" scenario the JSON-parse
+    // case exists to catch, just one step further along -- valid JSON, malformed contents.
+    const entry = { version: '1.0.0' };
+    const manifest = { version: '1.0.0' };
+    const result = decide(entry, manifest, () => Buffer.from(ACTUAL_CONTENT));
+    expect(result).toEqual({ status: STATUS_MANIFEST_MALFORMED });
+  });
+
+  it('reports manifest-malformed when "files" is present but not a plain object', () => {
+    const entry = { version: '1.0.0' };
+    const manifest = { version: '1.0.0', files: ['not', 'an', 'object'] };
+    const result = decide(entry, manifest, () => Buffer.from(ACTUAL_CONTENT));
+    expect(result).toEqual({ status: STATUS_MANIFEST_MALFORMED });
+  });
+});
+
+describe('runDeployCheck: manifest exists but is corrupt/malformed', () => {
+  // These reproduce the exact "truncated mid-deploy write" scenario this feature exists to
+  // catch, and the divergence a holistic review found between this hook and
+  // src/surfaces/deploy-verify.ts's verifyDeployedPlugin (commit dba66b8): before this fix,
+  // `existsSync(manifestPath) ? readJson(manifestPath) : undefined` produced `undefined` both
+  // when the manifest file is genuinely absent AND when it exists but fails to parse, so a
+  // corrupt manifest silently collapsed into the harmless no-manifest status instead of warning.
+  let dir: string;
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reports manifest-invalid (not no-manifest) when release-manifest.json is present but not valid JSON', () => {
+    dir = mkdtempSync(path.join(tmpdir(), TMP_DIR_PREFIX));
+    mkdirSync(path.join(dir, 'dist'), { recursive: true });
+    writeFileSync(path.join(dir, 'dist', 'release-manifest.json'), 'not valid json {');
+
+    const entry = { installPath: dir, version: '1.0.0' };
+    const result = runDeployCheck(entry);
+
+    expect(result).toEqual({ status: 'manifest-invalid' });
+  });
+
+  it('reports manifest-malformed (not no-manifest) when release-manifest.json is valid JSON but "files" is missing', () => {
+    dir = mkdtempSync(path.join(tmpdir(), TMP_DIR_PREFIX));
+    mkdirSync(path.join(dir, 'dist'), { recursive: true });
+    writeFileSync(
+      path.join(dir, 'dist', 'release-manifest.json'),
+      JSON.stringify({ version: '1.0.0' }),
+    );
+
+    const entry = { installPath: dir, version: '1.0.0' };
+    const result = runDeployCheck(entry);
+
+    expect(result).toEqual({ status: STATUS_MANIFEST_MALFORMED });
+  });
+
+  it('still reports no-manifest when release-manifest.json genuinely does not exist', () => {
+    dir = mkdtempSync(path.join(tmpdir(), TMP_DIR_PREFIX));
+    mkdirSync(path.join(dir, 'dist'), { recursive: true });
+
+    const entry = { installPath: dir, version: '1.0.0' };
+    const result = runDeployCheck(entry);
+
+    expect(result).toEqual({ status: 'no-manifest' });
   });
 });
 
