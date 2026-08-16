@@ -46,7 +46,10 @@ const hashFile = (absolutePath) =>
 export const buildManifest = (distributionDir, hooksDir, version) => {
   const files = {};
 
-  const distributionRelativePaths = walkFiles(distributionDir, (name) => name.endsWith('.js'));
+  const distributionRelativePaths = walkFiles(
+    distributionDir,
+    (name) => name.endsWith('.js') && !name.endsWith('.test.js'),
+  );
   for (const relativePath of distributionRelativePaths) {
     files[path.join('dist', relativePath)] = hashFile(path.join(distributionDir, relativePath));
   }
