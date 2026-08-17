@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.4.0...cc-recall-v0.4.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* **release:** restore biome-compliant formatting in package.json ([#78](https://github.com/joeblackwaslike/cc-recall/issues/78)) ([e25def6](https://github.com/joeblackwaslike/cc-recall/commit/e25def6a8d821475c92e8deedab119f998726e2a))
+
 ## [0.4.0](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.3.0...cc-recall-v0.4.0) (2026-08-16)
 
 
