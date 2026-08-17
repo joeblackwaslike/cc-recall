@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.3.0...cc-recall-v0.4.0) (2026-08-16)
+
+
+### Features
+
+* **doctor:** deployment self-verification (4th/5th doctor check + SessionStart hook) ([#77](https://github.com/joeblackwaslike/cc-recall/issues/77)) ([6bd667c](https://github.com/joeblackwaslike/cc-recall/commit/6bd667c24150a1a2ce6a1e3ef6dc2ea9b4d94a24))
+* **indexer:** add --setting-sources/--no-session-persistence to runClaudeHeadless ([#75](https://github.com/joeblackwaslike/cc-recall/issues/75)) ([4443715](https://github.com/joeblackwaslike/cc-recall/commit/44437151881bef949fc8f3c0a8f50bf1aa6783e6))
+
 ## [0.3.0](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.2.2...cc-recall-v0.3.0) (2026-08-14)
 
 
