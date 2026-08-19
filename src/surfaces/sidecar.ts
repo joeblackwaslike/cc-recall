@@ -39,10 +39,23 @@ const sleepSync = (ms: number): void => {
 const SQLITE_BUSY_ERRCODE = 5;
 
 /**
- * Match on both the SQLite error code and the message text, not the text alone. `errstr` duck-
- * typing on its own would treat any error object that happens to carry `errstr === 'database is
- * locked'` as retryable regardless of its actual SQLite error code — `errcode` pins it to the one
- * SQLite condition (`SQLITE_BUSY`) this retry loop exists for.
+ * Match on the documented Node error code (`ERR_SQLITE_ERROR`, per
+ * https://nodejs.org/api/errors.html#err_sqlite_error) plus the SQLite result code carried in
+ * `error.errcode`, not `code` alone — `ERR_SQLITE_ERROR` covers every SQLite error (schema
+ * errors, constraint violations, corruption), not just `SQLITE_BUSY`, so `errcode` is what pins
+ * this to the one condition the retry loop exists for.
+ *
+ * `errcode` (and its sibling `errstr`) are not part of any documented node:sqlite contract —
+ * neither https://nodejs.org/api/sqlite.html nor the `ERR_SQLITE_ERROR` entry above documents
+ * them, confirmed by reading both pages directly. They are, however, set deliberately in Node's
+ * own native binding (`src/node_sqlite.cc`, via `sqlite3_extended_errcode`) rather than being an
+ * accidental artifact, and were confirmed present on real thrown errors by probing node:sqlite
+ * directly against Node v26 / bundled SQLite 3.53.2. Node's binding never enables SQLite's
+ * extended-result-codes mode (no `sqlite3_extended_result_codes` call in that source file), so
+ * `errcode` stays pinned to the base result code (`5`) for every `SQLITE_BUSY` variant rather
+ * than splitting into extended codes like `SQLITE_BUSY_RECOVERY` (261) or `SQLITE_BUSY_SNAPSHOT`
+ * (517) — verified empirically, not guaranteed by any spec, so a future Node/node:sqlite version
+ * could change or drop this property without notice.
  */
 const isSqliteBusyError = (error: unknown): boolean =>
   error instanceof Error &&
@@ -155,15 +168,31 @@ const migrateTranscriptSyncedHash = (db: DatabaseSync): void => {
     db.exec('BEGIN IMMEDIATE');
     try {
       db.exec('ALTER TABLE sessions ADD COLUMN transcript_synced_hash TEXT;');
+      db.exec(
+        'UPDATE sessions SET transcript_synced_hash = source_hash WHERE transcript_synced_hash IS NULL;',
+      );
+      db.exec('COMMIT');
     } catch (error) {
-      db.exec('ROLLBACK');
+      // ROLLBACK itself can throw "no transaction is active" if SQLite already aborted the
+      // transaction implicitly for some error classes (e.g. I/O failure) — swallow that so it
+      // can't mask the real error being handled below. Rolling back here, rather than only on
+      // the ALTER TABLE failure, matters for retry correctness: if UPDATE or COMMIT throws
+      // SQLITE_BUSY instead of ALTER TABLE, the transaction opened by BEGIN IMMEDIATE above is
+      // still open when withBusyRetry's outer catch retries this whole action. Without an
+      // explicit ROLLBACK first, the retried attempt's own BEGIN IMMEDIATE fails with "cannot
+      // start a transaction within a transaction" — a non-busy error that withBusyRetry doesn't
+      // retry — turning transient lock contention into a hard `openSidecar` failure instead of a
+      // clean retry. Confirmed with a fake-db repro forcing SQLITE_BUSY on the UPDATE and on the
+      // COMMIT: without this, both wedge on the immediately-following BEGIN; with it, both retry
+      // and succeed.
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // transaction already gone; nothing to undo
+      }
       if (error instanceof Error && error.message.includes('duplicate column name')) return;
       throw error;
     }
-    db.exec(
-      'UPDATE sessions SET transcript_synced_hash = source_hash WHERE transcript_synced_hash IS NULL;',
-    );
-    db.exec('COMMIT');
   });
 };
 
