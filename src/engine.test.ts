@@ -168,8 +168,11 @@ const expectGarbageProjectDirExcludedFromBackfill = async (
 
   const summary = await backfill(sidecar, { projectsRoot: root, baseDir, llm: false });
   // Only the real fixture session from beforeEach should be counted — the garbage dir must
-  // never be enumerated at all, not merely skipped after being read.
+  // never be enumerated at all, not merely skipped after being read. Asserting on `ghost2`
+  // directly, not just the count, keeps this meaningful if a future change adds a second
+  // real fixture to `root`.
   expect(summary.total).toBe(1);
+  expect(sidecar.get('ghost2')).toBeUndefined();
 };
 
 /**
