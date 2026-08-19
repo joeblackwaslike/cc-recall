@@ -43,6 +43,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 );
 `;
 
+/**
+ * Add `transcript_synced_hash` to a `sessions` table that predates it.
+ *
+ * SQLite's `ALTER TABLE ... ADD COLUMN` has no `IF NOT EXISTS` clause (unlike Postgres) — running
+ * it twice throws `duplicate column name`, confirmed against the node:sqlite-bundled SQLite
+ * 3.53.2. So this checks `pragma_table_info` first and only migrates once. Deliberately not part
+ * of `CREATE TABLE IF NOT EXISTS sessions (...)`: that statement is a no-op against the live
+ * production `index.db`, which already has a `sessions` table without this column — only an
+ * explicit `ALTER TABLE`, run here on every `openSidecar` call, reaches it.
+ */
+const migrateTranscriptSyncedHash = (db: DatabaseSync): void => {
+  const columns = db.prepare("SELECT name FROM pragma_table_info('sessions')").all() as {
+    name: string;
+  }[];
+  if (columns.some((column) => column.name === 'transcript_synced_hash')) return;
+  db.exec('ALTER TABLE sessions ADD COLUMN transcript_synced_hash TEXT;');
+};
+
 const UPSERT_SQL = `
 INSERT INTO sessions (
   session_id, project, cwd, git_branch, started_at, ended_at, line_count,
@@ -78,6 +96,8 @@ export interface Sidecar {
   upsert: (record: RecallRecord, sourceHash?: string) => void;
   get: (sessionId: string) => RecallRecord | undefined;
   getSourceHash: (sessionId: string) => string | undefined;
+  getTranscriptSyncedHash: (sessionId: string) => string | undefined;
+  markTranscriptSynced: (sessionId: string, sourceHash: string) => void;
   search: (query: string, limit?: number) => SearchHit[];
   /** Every record in the store, ordered by started_at (for batch lineage resolution). */
   listAll: () => RecallRecord[];
@@ -144,6 +164,8 @@ interface Statements {
   deleteFts: StatementSync;
   selectOne: StatementSync;
   selectHash: StatementSync;
+  selectSyncedHash: StatementSync;
+  markSynced: StatementSync;
   listAllStmt: StatementSync;
   searchStmt: StatementSync;
   topStmt: StatementSync;
@@ -159,6 +181,12 @@ const prepareStatements = (db: DatabaseSync): Statements => ({
   deleteFts: db.prepare('DELETE FROM sessions_fts WHERE session_id = $session_id'),
   selectOne: db.prepare('SELECT record_json FROM sessions WHERE session_id = $session_id'),
   selectHash: db.prepare('SELECT source_hash FROM sessions WHERE session_id = $session_id'),
+  selectSyncedHash: db.prepare(
+    'SELECT transcript_synced_hash FROM sessions WHERE session_id = $session_id',
+  ),
+  markSynced: db.prepare(
+    'UPDATE sessions SET transcript_synced_hash = $hash WHERE session_id = $session_id',
+  ),
   listAllStmt: db.prepare('SELECT record_json FROM sessions ORDER BY started_at'),
   searchStmt: db.prepare(
     `SELECT s.record_json AS record_json, bm25(sessions_fts) AS score
@@ -171,6 +199,18 @@ const prepareStatements = (db: DatabaseSync): Statements => ({
   countStmt: db.prepare('SELECT count(*) AS total FROM sessions'),
   provStmt: db.prepare('SELECT provenance, count(*) AS n FROM sessions GROUP BY provenance'),
 });
+
+/** Read a single nullable TEXT column from a `session_id`-keyed statement. */
+const selectOptionalString = (
+  preparedStatement: StatementSync,
+  sessionId: string,
+  column: string,
+): string | undefined => {
+  const row = preparedStatement.get({ $session_id: sessionId }) as
+    | Record<string, string | null>
+    | undefined;
+  return row?.[column] ?? undefined;
+};
 
 const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
   upsert(record, sourceHash) {
@@ -200,10 +240,13 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
     return row ? parseRecallRecord(JSON.parse(row.record_json)) : undefined;
   },
   getSourceHash(sessionId) {
-    const row = statement.selectHash.get({ $session_id: sessionId }) as
-      | undefined
-      | { source_hash: string | null };
-    return row?.source_hash ?? undefined;
+    return selectOptionalString(statement.selectHash, sessionId, 'source_hash');
+  },
+  getTranscriptSyncedHash(sessionId) {
+    return selectOptionalString(statement.selectSyncedHash, sessionId, 'transcript_synced_hash');
+  },
+  markTranscriptSynced(sessionId, sourceHash) {
+    statement.markSynced.run({ $session_id: sessionId, $hash: sourceHash });
   },
   listAll() {
     const rows = statement.listAllStmt.all() as { record_json: string }[];
@@ -256,5 +299,6 @@ export const openSidecar = (dbPath: string): Sidecar => {
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
   db.exec(SCHEMA_SQL);
+  migrateTranscriptSyncedHash(db);
   return buildSidecar(db, prepareStatements(db));
 };
