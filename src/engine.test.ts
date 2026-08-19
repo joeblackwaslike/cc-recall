@@ -42,6 +42,43 @@ const appendMidSynthesis = (file: string): Promise<string> => {
   return Promise.resolve(STUB_ENRICHMENT);
 };
 
+/**
+ * A stale-source skip (transcript grew mid-synthesis) must not starve the retry forever
+ * (cc-recall-m32): the next pass, once the transcript has gone idle, has to actually write.
+ * Extracted out of the `describe` block to keep it under the `max-lines-per-function` cap.
+ */
+const expectStaleSourceSkipRetriesOnNextPass = async (
+  file: string,
+  sidecar: Sidecar,
+  baseDir: string,
+): Promise<void> => {
+  // First pass: the injected llm runner appends mid-synthesis, so the writer declines with
+  // skipReason 'stale-source' — same setup as the warning test above.
+  const first = await indexSession(file, sidecar, {
+    baseDir,
+    llm: () => appendMidSynthesis(file),
+  });
+  expect(first.written).toBe(false);
+  // Sidecar is already stamped with the new content's hash even though the transcript wasn't
+  // written — that's the divergence m32 describes.
+  const afterFirst = readFileSync(file, 'utf8');
+  expect(afterFirst).not.toContain(RECALL_RECORD_TYPE);
+
+  // Backdate: the mid-synthesis append left a fresh mtime, which would otherwise trip the
+  // unrelated active-session guard (cc-recall-kg8) and mask the retry gate under test here.
+  const past = new Date(Date.now() - ONE_HOUR_MS);
+  utimesSync(file, past, past);
+
+  // Second pass: transcript content hasn't changed since the append (no further mid-synthesis
+  // append this time), so a purely source-hash-based guard would treat this as already-current
+  // and skip it forever. The fix must retry anyway, because the transcript was never written.
+  const second = await indexSession(file, sidecar, { llm: false, baseDir });
+  expect(second.skipped).toBe(false);
+  expect(second.written).toBe(true);
+  const afterSecond = readFileSync(file, 'utf8');
+  expect(afterSecond).toContain(RECALL_RECORD_TYPE);
+};
+
 describe('engine', () => {
   let root: string;
   let baseDir: string;
@@ -112,6 +149,10 @@ describe('engine', () => {
     expect(after).toContain('appended mid-synthesis');
     // And the write really was declined: no cc-recall record was injected.
     expect(after).not.toContain(RECALL_RECORD_TYPE);
+  });
+
+  it('retries the transcript write on the next pass after a stale-source skip (cc-recall-m32)', async () => {
+    await expectStaleSourceSkipRetriesOnNextPass(file, sidecar, baseDir);
   });
 
   it('backfill is idempotent across runs', async () => {

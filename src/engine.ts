@@ -225,7 +225,11 @@ export const indexSession = async (
         skipped: true,
       };
     }
-  } else if (!options.force && sidecar.getSourceHash(parsed.sessionId) === sourceHash) {
+  } else if (
+    !options.force &&
+    sidecar.getSourceHash(parsed.sessionId) === sourceHash &&
+    sidecar.getTranscriptSyncedHash(parsed.sessionId) === sourceHash
+  ) {
     return { sessionId: parsed.sessionId, title: '(unchanged)', written: false, skipped: true };
   }
 
@@ -242,6 +246,9 @@ export const indexSession = async (
 
   sidecar.upsert(record, sourceHash);
   const write = writeToTranscript(filePath, record, sourceHash, options);
+  if (write.written || write.skipReason === 'unchanged') {
+    sidecar.markTranscriptSynced(parsed.sessionId, sourceHash);
+  }
   await writeToClaudeMem(record, options);
 
   return {
