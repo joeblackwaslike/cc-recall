@@ -27,7 +27,7 @@ const BUSY_TIMEOUT_MS = 5000;
 
 const OPEN_RETRY_ATTEMPTS = 10;
 const OPEN_RETRY_DELAY_MS = 25;
-/** One Int32 slot, all `Atomics.wait` needs regardless of the value stored in it. */
+/** The buffer is zero-initialized; `Atomics.wait` expects slot 0 to equal 0 and sleeps for `ms` ms before returning `'timed-out'`. */
 const SYNC_SLEEP_BUFFER_BYTES = Int32Array.BYTES_PER_ELEMENT;
 
 /** Synchronous sleep — `node:sqlite` is a sync API, so an async delay can't sit between retries. */
@@ -35,11 +35,24 @@ const sleepSync = (ms: number): void => {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(SYNC_SLEEP_BUFFER_BYTES)), 0, 0, ms);
 };
 
-const isSqliteBusyError = (error: unknown): boolean =>
-  error instanceof Error && 'errstr' in error && error.errstr === 'database is locked';
+/** SQLite's own error code for `SQLITE_BUSY`, per https://www.sqlite.org/rescode.html#busy. */
+const SQLITE_BUSY_ERRCODE = 5;
 
 /**
- * Retry a schema-setup statement through `SQLITE_BUSY`.
+ * Match on both the SQLite error code and the message text, not the text alone. `errstr` duck-
+ * typing on its own would treat any error object that happens to carry `errstr === 'database is
+ * locked'` as retryable regardless of its actual SQLite error code — `errcode` pins it to the one
+ * SQLite condition (`SQLITE_BUSY`) this retry loop exists for.
+ */
+const isSqliteBusyError = (error: unknown): boolean =>
+  error instanceof Error &&
+  'code' in error &&
+  error.code === 'ERR_SQLITE_ERROR' &&
+  'errcode' in error &&
+  error.errcode === SQLITE_BUSY_ERRCODE;
+
+/**
+ * Retry an action through `SQLITE_BUSY`.
  *
  * `PRAGMA busy_timeout` (set immediately after opening the connection, below) covers most lock
  * contention between two processes racing to open the same pre-existing `index.db`, but the
@@ -48,16 +61,22 @@ const isSqliteBusyError = (error: unknown): boolean =>
  * pre-migration db repeatedly: `busy_timeout` alone cut failures from every trial to roughly 1 in
  * 5, and this retry loop around the whole open sequence was needed to close the rest.
  */
-const execWithBusyRetry = (db: DatabaseSync, sql: string): void => {
+const withBusyRetry = <T>(action: () => T): T => {
   for (let attempt = 1; ; attempt += 1) {
     try {
-      db.exec(sql);
-      return;
+      return action();
     } catch (error) {
-      if (!isSqliteBusyError(error) || attempt >= OPEN_RETRY_ATTEMPTS) throw error;
+      if (!isSqliteBusyError(error)) throw error;
+      if (attempt >= OPEN_RETRY_ATTEMPTS) throw error;
       sleepSync(OPEN_RETRY_DELAY_MS);
     }
   }
+};
+
+const execWithBusyRetry = (db: DatabaseSync, sql: string): void => {
+  withBusyRetry(() => {
+    db.exec(sql);
+  });
 };
 
 const clampLimit = (limit: number): number =>
@@ -99,11 +118,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
  * production `index.db`, which already has a `sessions` table without this column — only an
  * explicit `ALTER TABLE`, run here on every `openSidecar` call, reaches it.
  *
+ * `ALTER TABLE ... ADD COLUMN` and the backfill `UPDATE` run inside a single `BEGIN
+ * IMMEDIATE ... COMMIT` transaction, specifically so column existence stays a trustworthy
+ * completion marker: SQLite's DDL is transactional, so if this process is killed between the two
+ * statements, the whole transaction — including the `ALTER TABLE` — rolls back, and the column
+ * still doesn't exist on the next `openSidecar` call. Without that atomicity, a crash in that
+ * window would leave the column present but every pre-existing row permanently un-backfilled,
+ * since every future call takes the fast "column already exists" return above and the backfill
+ * would never run again.
+ *
  * Two OS processes can both pass the `pragma_table_info` check before either runs `ALTER TABLE`
  * (e.g. two `hooks/session-end.mjs` runs racing on the same pre-migration `index.db`) — the loser
- * hits `duplicate column name` on its own `ALTER TABLE`. That's not a real failure, just proof the
- * other process already won the migration (and already ran the backfill below), so it is treated
- * as a no-op rather than re-thrown.
+ * hits `duplicate column name` on its own `ALTER TABLE`. Because the transaction is atomic, that
+ * failure is proof the other process's *entire* migration (`ALTER TABLE` + backfill `UPDATE`)
+ * already committed — never a partial win — so the loser rolls back its own no-op transaction and
+ * returns rather than re-throwing or re-running the backfill itself.
  *
  * The backfill (`UPDATE ... WHERE transcript_synced_hash IS NULL`) only runs in the branch where
  * *this* process's own `ALTER TABLE` just succeeded — never on the fast "column already exists"
@@ -121,16 +150,21 @@ const migrateTranscriptSyncedHash = (db: DatabaseSync): void => {
     name: string;
   }[];
   if (columns.some((column) => column.name === 'transcript_synced_hash')) return;
-  try {
-    execWithBusyRetry(db, 'ALTER TABLE sessions ADD COLUMN transcript_synced_hash TEXT;');
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('duplicate column name')) return;
-    throw error;
-  }
-  execWithBusyRetry(
-    db,
-    'UPDATE sessions SET transcript_synced_hash = source_hash WHERE transcript_synced_hash IS NULL;',
-  );
+
+  withBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec('ALTER TABLE sessions ADD COLUMN transcript_synced_hash TEXT;');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      if (error instanceof Error && error.message.includes('duplicate column name')) return;
+      throw error;
+    }
+    db.exec(
+      'UPDATE sessions SET transcript_synced_hash = source_hash WHERE transcript_synced_hash IS NULL;',
+    );
+    db.exec('COMMIT');
+  });
 };
 
 const UPSERT_SQL = `
@@ -276,7 +310,7 @@ const prepareStatements = (db: DatabaseSync): Statements => ({
 const selectOptionalString = (
   preparedStatement: StatementSync,
   sessionId: string,
-  column: string,
+  column: 'source_hash' | 'transcript_synced_hash',
 ): string | undefined => {
   const row = preparedStatement.get({ $session_id: sessionId }) as
     | Record<string, string | null>
@@ -369,9 +403,18 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
 export const openSidecar = (dbPath: string): Sidecar => {
   if (dbPath !== IN_MEMORY) mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
-  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
-  execWithBusyRetry(db, 'PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  execWithBusyRetry(db, SCHEMA_SQL);
-  migrateTranscriptSyncedHash(db);
-  return buildSidecar(db, prepareStatements(db));
+  try {
+    db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
+    execWithBusyRetry(db, 'PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    execWithBusyRetry(db, SCHEMA_SQL);
+    migrateTranscriptSyncedHash(db);
+    return buildSidecar(db, prepareStatements(db));
+  } catch (error) {
+    // Every setup step above can throw (busy_timeout, WAL setup, schema exec, migration) — if any
+    // does, the connection must not leak. An open-but-unusable handle left alive in-process turns
+    // a transient setup failure into follow-on SQLITE_BUSY errors for every later `openSidecar`
+    // call against the same file, which is much harder to diagnose than the original error.
+    db.close();
+    throw new Error(`Failed to open sidecar database at ${dbPath}`, { cause: error });
+  }
 };

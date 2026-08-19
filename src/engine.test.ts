@@ -173,16 +173,90 @@ const expectGarbageProjectDirExcludedFromBackfill = async (
 };
 
 /**
- * Same invariant as the "-" case, different degenerate value: a `/./` path segment with nothing
- * after it makes `path.dirname` return a path ending in "." and `projectFromPath` return "."
- * right along with it -- exactly as structurally invalid as "-" under the "every real cwd is an
- * absolute path with at least one more path segment" invariant (cc-recall-xkf follow-up).
+ * Same invariant as the "-" case, different degenerate value: a bare filename with no directory
+ * component at all makes `path.dirname` return "." and `projectFromPath` return "." right along
+ * with it -- exactly as structurally invalid as "-" under the "every real cwd is an absolute path
+ * with at least one more path segment" invariant (cc-recall-xkf follow-up).
  */
-const expectDotProjectDirIsSkipped = async (root: string, sidecar: Sidecar): Promise<void> => {
-  writeFileSync(`${root}/./ghost3.jsonl`, garbageTranscript('ghost3'));
-  const result = await indexSession(`${root}/./ghost3.jsonl`, sidecar, { llm: false });
-  expect(result).toMatchObject({ skipped: true, written: false });
+const expectBareFilenameIsSkipped = async (root: string, sidecar: Sidecar): Promise<void> => {
+  writeFileSync(path.join(root, 'ghost3.jsonl'), garbageTranscript('ghost3'));
+  const cwd = process.cwd();
+  process.chdir(root);
+  try {
+    const result = await indexSession('ghost3.jsonl', sidecar, { llm: false });
+    expect(result).toMatchObject({ skipped: true, written: false });
+  } finally {
+    process.chdir(cwd);
+  }
   expect(sidecar.get('ghost3')).toBeUndefined();
+};
+
+/**
+ * A `/./` segment *inside* an otherwise real path must not be misread as "no directory component
+ * at all" (cc-recall-xkf follow-up regression, caught in review): without normalizing first,
+ * `path.dirname('/proj/./s.jsonl')` is `/proj/.`, whose `basename` is `.` -- which the
+ * degenerate-project-dir guard would then wrongly treat as garbage, permanently skipping a
+ * session that lives under a perfectly real project directory.
+ */
+const expectMidPathDotSegmentIsNotGarbage = async (
+  root: string,
+  sidecar: Sidecar,
+  baseDir: string,
+): Promise<void> => {
+  const file = `${path.join(root, PROJECT_DIR)}/./ghost4.jsonl`;
+  writeFileSync(file, garbageTranscript('ghost4'));
+  // Backdate: a fresh mtime would trip the unrelated active-session guard (cc-recall-kg8) and
+  // mask the degenerate-project-dir behavior this test actually targets.
+  const past = new Date(Date.now() - ONE_HOUR_MS);
+  utimesSync(file, past, past);
+  const result = await indexSession(file, sidecar, { llm: false, baseDir });
+  expect(result.skipped).toBe(false);
+  expect(sidecar.get('ghost4')?.project).toBe(PROJECT_DIR);
+};
+
+/**
+ * A `write.skipReason === 'unchanged'` outcome (the transcript already carries this exact
+ * record) must stamp `transcript_synced_hash` just like an actual write does — otherwise a
+ * session whose sidecar row is missing or rebuilt (e.g. cc-recall-xkf's manual purge) but whose
+ * transcript was already enriched re-synthesizes on every single pass, forever.
+ */
+const expectUnchangedWriteSkipStillStampsSync = async (
+  file: string,
+  sidecar: Sidecar,
+  baseDir: string,
+): Promise<void> => {
+  // Pass 1 with a real sidecar: writes the transcript and stamps both hashes normally.
+  await indexSession(file, sidecar, { llm: () => Promise.resolve(STUB_ENRICHMENT), baseDir });
+
+  // A fresh sidecar has no row for this session, so the unchanged-hash skip at the top of
+  // indexSession can't fire — it re-synthesizes. The transcript already carries this exact
+  // record, so the writer declines with skipReason 'unchanged' rather than rewriting it.
+  const rebuilt = openSidecar(':memory:');
+  let calls = 0;
+  const first = await indexSession(file, rebuilt, {
+    llm: () => {
+      calls += 1;
+      return Promise.resolve(STUB_ENRICHMENT);
+    },
+    baseDir,
+  });
+  expect(calls).toBe(1);
+  expect(first).toMatchObject({ written: false, skipped: true });
+
+  // The load-bearing assertion: the next pass must read this session as unchanged and skip
+  // synthesis entirely — proof markTranscriptSynced ran off the writer's 'unchanged' outcome,
+  // not only off an actual write.
+  let secondCalls = 0;
+  const second = await indexSession(file, rebuilt, {
+    llm: () => {
+      secondCalls += 1;
+      return Promise.resolve(STUB_ENRICHMENT);
+    },
+    baseDir,
+  });
+  expect(secondCalls).toBe(0);
+  expect(second).toMatchObject({ skipped: true, written: false, title: '(unchanged)' });
+  rebuilt.close();
 };
 
 describe('engine', () => {
@@ -229,6 +303,10 @@ describe('engine', () => {
     expect(second.written).toBe(false);
   });
 
+  it('stamps transcript_synced_hash from a writer "unchanged" skip, not just a written record', async () => {
+    await expectUnchangedWriteSkipStillStampsSync(file, sidecar, baseDir);
+  });
+
   it('dry-run neither writes the sidecar nor the transcript', async () => {
     const result = await indexSession(file, sidecar, { dryRun: true, baseDir });
     expect(result.written).toBe(false);
@@ -264,6 +342,29 @@ describe('engine', () => {
   it('retries the transcript write on the next pass after an active-session skip (cc-recall-m32)', async () => {
     await expectActiveSessionSkipRetriesOnNextPass(file, sidecar, baseDir);
   });
+});
+
+// Split out of the 'engine' describe above to stay under this file's max-lines-per-function
+// budget — same fixture shape (root/baseDir/file/sidecar), just a separate describe block.
+describe('engine — garbage project-dir guards and backfill idempotency', () => {
+  let root: string;
+  let baseDir: string;
+  let sidecar: Sidecar;
+  beforeEach(() => {
+    const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-eng-dir-'));
+    root = path.join(tmp, 'projects');
+    baseDir = path.join(tmp, 'base');
+    mkdirSync(path.join(root, PROJECT_DIR), { recursive: true });
+    const file = path.join(root, PROJECT_DIR, `${SESSION}.jsonl`);
+    writeFileSync(file, transcript);
+    const past = new Date(Date.now() - ONE_HOUR_MS);
+    utimesSync(file, past, past);
+    sidecar = openSidecar(':memory:');
+  });
+  afterEach(() => {
+    sidecar.close();
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
 
   it('skips a session whose project directory is the degenerate slug "-" (cc-recall-xkf)', async () => {
     await expectGarbageProjectDirIsSkipped(root, sidecar, baseDir);
@@ -274,7 +375,11 @@ describe('engine', () => {
   });
 
   it('skips a session whose project directory resolves to "."', async () => {
-    await expectDotProjectDirIsSkipped(root, sidecar);
+    await expectBareFilenameIsSkipped(root, sidecar);
+  });
+
+  it('does not treat a mid-path "/./ " segment as a degenerate project dir', async () => {
+    await expectMidPathDotSegmentIsNotGarbage(root, sidecar, baseDir);
   });
 
   it('backfill is idempotent across runs', async () => {
@@ -315,29 +420,6 @@ const seedBatch = (dir: string, count: number): void => {
     const past = new Date(Date.now() - ONE_HOUR_MS);
     utimesSync(file, past, past);
   }
-};
-
-/**
- * Seeds two sessions and runs one backfill pass where the first enriches and the second degrades
- * (LLM rejects). Shared setup for the --only-heuristic repair tests below.
- */
-const seedOneEnrichedOneDegraded = async (
-  sidecar: Sidecar,
-  projectDir: string,
-  root: string,
-  baseDir: string,
-): Promise<void> => {
-  seedBatch(projectDir, TWO);
-  let call = 0;
-  await backfill(sidecar, {
-    projectsRoot: root,
-    baseDir,
-    skipClaudeMem: true,
-    llm: () => {
-      call += 1;
-      return call === 1 ? Promise.resolve(STUB_ENRICHMENT) : Promise.reject(new Error('down'));
-    },
-  });
 };
 
 /**
@@ -430,95 +512,5 @@ describe('engine — LLM degradation is visible and bounded', () => {
   });
 });
 
-describe('engine — heuristic records are identifiable and repairable', () => {
-  let root: string;
-  let baseDir: string;
-  let projectDir: string;
-  let sidecar: Sidecar;
-
-  beforeEach(() => {
-    const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-rep-'));
-    root = path.join(tmp, 'projects');
-    baseDir = path.join(tmp, 'base');
-    projectDir = path.join(root, PROJECT_DIR);
-    mkdirSync(projectDir, { recursive: true });
-    sidecar = openSidecar(':memory:');
-  });
-  afterEach(() => {
-    sidecar.close();
-    rmSync(path.dirname(root), { recursive: true, force: true });
-  });
-
-  it('stamps a failed LLM pass as heuristic, with the reason', async () => {
-    seedBatch(projectDir, 1);
-    await backfill(sidecar, {
-      projectsRoot: root,
-      baseDir,
-      skipClaudeMem: true,
-      llm: () => Promise.reject(new Error('429 rate limited')),
-    });
-    const stored = sidecar.get('s-batch-0');
-    expect(stored?.enrichment).toBe('heuristic');
-    expect(stored?.enrichment_error).toMatch(/429/);
-  });
-
-  it('stamps a successful LLM pass as llm', async () => {
-    seedBatch(projectDir, 1);
-    await backfill(sidecar, {
-      projectsRoot: root,
-      baseDir,
-      skipClaudeMem: true,
-      llm: () => Promise.resolve(STUB_ENRICHMENT),
-    });
-    const stored = sidecar.get('s-batch-0');
-    expect(stored?.enrichment).toBe('llm');
-    expect(stored?.enrichment_error).toBeUndefined();
-  });
-
-  it('--only-heuristic re-synthesizes the degraded and leaves the enriched alone', async () => {
-    await seedOneEnrichedOneDegraded(sidecar, projectDir, root, baseDir);
-
-    // Repair pass with force, so the hash check does not skip everything.
-    let repairCalls = 0;
-    const repair = await backfill(sidecar, {
-      projectsRoot: root,
-      baseDir,
-      skipClaudeMem: true,
-      force: true,
-      onlyHeuristic: true,
-      llm: () => {
-        repairCalls += 1;
-        return Promise.resolve(STUB_ENRICHMENT);
-      },
-    });
-
-    // The whole point: one LLM call, not two. The already-enriched session is skipped before
-    // synthesis rather than after.
-    expect(repairCalls).toBe(1);
-    expect(repair.skipped).toBe(1);
-    expect(sidecar.get('s-batch-1')?.enrichment).toBe('llm');
-  });
-
-  it('--only-heuristic alone repairs a degraded session, without also requiring --force', async () => {
-    // The advertised repair command is `--only-heuristic`, not `--only-heuristic --force`. A
-    // degraded record's transcript is typically unchanged since it was last indexed -- that's
-    // the normal repair scenario -- so if onlyHeuristic doesn't bypass the unchanged-hash skip on
-    // its own, the command silently does nothing for the exact case it exists to fix.
-    await seedOneEnrichedOneDegraded(sidecar, projectDir, root, baseDir);
-
-    let repairCalls = 0;
-    await backfill(sidecar, {
-      projectsRoot: root,
-      baseDir,
-      skipClaudeMem: true,
-      onlyHeuristic: true,
-      llm: () => {
-        repairCalls += 1;
-        return Promise.resolve(STUB_ENRICHMENT);
-      },
-    });
-
-    expect(repairCalls).toBe(1);
-    expect(sidecar.get('s-batch-1')?.enrichment).toBe('llm');
-  });
-});
+// The "heuristic records are identifiable and repairable" suite lives in
+// engine.heuristic-repair.test.ts, split out to stay under this file's max-lines budget.

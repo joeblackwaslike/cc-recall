@@ -35,7 +35,14 @@ import { parseTranscriptText } from './transcript/parse.js';
 export const defaultProjectsRoot = (): string => path.join(homedir(), '.claude', 'projects');
 
 /** The encoded-cwd project dir name a transcript lives under. */
-export const projectFromPath = (filePath: string): string => path.basename(path.dirname(filePath));
+/**
+ * Normalizes first so a `/./` segment collapses before `dirname`/`basename` run — otherwise a
+ * legitimate path like `/tmp/proj/./session.jsonl` yields `dirname` `/tmp/proj/.` and `basename`
+ * `.`, which the degenerate-project-dir guard below would then treat as garbage and skip forever,
+ * even though the session genuinely lives under the real `proj` directory.
+ */
+export const projectFromPath = (filePath: string): string =>
+  path.basename(path.dirname(path.normalize(filePath)));
 
 /**
  * Claude Code encodes a cwd into a project dir name by replacing `/` and `.` with `-`.
@@ -201,17 +208,19 @@ const isIndexerRun = (
  * directory name `-` — never a real project, since every real cwd is an absolute path with at
  * least one more path segment than that. `projectFromPath` can also yield `''` (a root-level
  * file path, e.g. `/ghost.jsonl`) or `'.'` (a file path with no directory component at all,
- * e.g. `ghost.jsonl`) — both are exactly as structurally invalid under the same invariant.
- * ~44K `-` rows were manually purged from production on 2026-08-15 (cc-recall-xkf); this stops
- * new ones — of any of these three shapes — from being indexed at all rather than relying on
- * another manual cleanup.
+ * e.g. `ghost.jsonl`) — both are exactly as structurally invalid under the same invariant, though
+ * only `-` has been observed in production so far; `''` and `'.'` are preventive additions from
+ * the same structural analysis, not separately confirmed at scale. ~44K `-` rows were manually
+ * purged from production on 2026-08-15 (cc-recall-xkf); this stops new ones — of any of these
+ * three shapes — from being indexed at all rather than relying on another manual cleanup.
  */
 const GARBAGE_PROJECT_DIRS = new Set(['-', '', '.']);
 const isGarbageProjectDir = (project: string): boolean => GARBAGE_PROJECT_DIRS.has(project);
 
 /**
- * Extracted solely to satisfy max-statements; there is no second caller — inline this back into
- * indexSession if that constraint ever relaxes.
+ * Extracted solely to satisfy max-statements; there is no second caller in `indexSession` —
+ * inline this back if that constraint ever relaxes. Note: `isGarbageProjectDir` itself has a
+ * second call site in `listTranscripts` and must not be removed alongside this helper.
  */
 const skipGarbageProject = (
   filePath: string,
