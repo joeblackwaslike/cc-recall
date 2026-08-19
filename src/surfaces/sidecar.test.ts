@@ -9,6 +9,7 @@ import { parseTranscriptText } from '../transcript/parse.js';
 import { type Sidecar, openSidecar } from './sidecar.js';
 
 const ADD_FTS = 'add FTS search to the sidecar';
+const S_MIDFLIGHT = 's-midflight';
 
 const recordFor = (sessionId: string, text: string): RecallRecord => {
   const line = JSON.stringify({
@@ -44,6 +45,101 @@ const PRE_MIGRATION_SCHEMA_SQL = `
     record_json TEXT NOT NULL
   );
 `;
+
+/**
+ * Write a single row directly against the pre-migration schema (no `transcript_synced_hash`
+ * column at all), simulating a row that predates the migration entirely.
+ */
+const insertPreMigrationRow = (dbPath: string, record: RecallRecord, sourceHash: string): void => {
+  const oldDb = new DatabaseSync(dbPath);
+  oldDb.exec(PRE_MIGRATION_SCHEMA_SQL);
+  oldDb
+    .prepare(
+      `INSERT INTO sessions (
+        session_id, project, cwd, started_at, ended_at, line_count, title, summary,
+        provenance, schema_version, synthesizer_version, generated_at, source_hash, record_json
+      ) VALUES (
+        $session_id, $project, $cwd, $started_at, $ended_at, $line_count, $title, $summary,
+        $provenance, $schema_version, $synthesizer_version, $generated_at, $source_hash, $record_json
+      )`,
+    )
+    .run({
+      $session_id: record.session_id,
+      $project: record.project,
+      $cwd: record.cwd,
+      $started_at: record.started_at,
+      $ended_at: record.ended_at,
+      $line_count: record.line_count,
+      $title: record.title,
+      $summary: record.summary,
+      $provenance: record.provenance,
+      $schema_version: record.schema_version,
+      $synthesizer_version: record.synthesizer_version,
+      $generated_at: record.generated_at,
+      $source_hash: sourceHash,
+      $record_json: JSON.stringify(record),
+    });
+  oldDb.close();
+};
+
+/**
+ * cc-recall-m32's fix (transcript_synced_hash) is only correct if pre-existing rows read as
+ * already-synced, not as a retry-gate miss. Without a backfill, `getTranscriptSyncedHash` is NULL
+ * for every row that predates the column, and the retry gate in engine.ts
+ * (`getTranscriptSyncedHash(id) === sourceHash`) is always false for NULL — so the entire
+ * pre-existing corpus (tens of thousands of sessions) would fail the unchanged-skip and get fully
+ * re-synthesized, LLM calls included, on the very next backfill/repair pass.
+ */
+const expectPreexistingRowIsBackfilled = (): void => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-sidecar-backfill-'));
+  const dbPath = path.join(tmp, 'index.db');
+  try {
+    const record = recordFor('s-preexisting', ADD_FTS);
+    // Simulate a pre-migration database with a row already in it, written entirely under the old
+    // schema — no transcript_synced_hash column exists at all yet.
+    insertPreMigrationRow(dbPath, record, 'preexisting-hash');
+
+    // Reopening with the current code must migrate AND backfill the pre-existing row in place,
+    // treating it as already-synced rather than forcing it through resynthesis.
+    const migrated = openSidecar(dbPath);
+    expect(migrated.getTranscriptSyncedHash('s-preexisting')).toBe('preexisting-hash');
+    migrated.close();
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+};
+
+/**
+ * The backfill above must not become an unconditional "mark everything synced" that runs on every
+ * openSidecar call — that would defeat cc-recall-m32's own retry-gate fix for brand-new sessions
+ * caught mid-flight (upserted but not yet transcript-synced). Once the column already exists,
+ * reopening the sidecar must take the fast "already migrated" path and leave a not-yet-synced row
+ * alone.
+ */
+const expectMidflightRowSurvivesReopen = (): void => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-sidecar-no-rebackfill-'));
+  const dbPath = path.join(tmp, 'index.db');
+  try {
+    const record = recordFor(S_MIDFLIGHT, ADD_FTS);
+
+    // First open: column gets added (table is empty, so the backfill UPDATE is a no-op), then
+    // upsert without ever calling markTranscriptSynced — the same state a stale-source or
+    // active-session skip leaves behind.
+    const first = openSidecar(dbPath);
+    first.upsert(record, 'hash-1');
+    expect(first.getTranscriptSyncedHash(S_MIDFLIGHT)).toBeUndefined();
+    first.close();
+
+    // Reopen: transcript_synced_hash already exists, so this must take the early-return path and
+    // must not re-run the backfill against the row left mid-flight above.
+    const second = openSidecar(dbPath);
+    expect(second.getTranscriptSyncedHash(S_MIDFLIGHT)).toBeUndefined();
+    expect(second.getSourceHash(S_MIDFLIGHT)).toBe('hash-1');
+    second.close();
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+};
 
 describe('sidecar', () => {
   let sidecar: Sidecar;
@@ -124,5 +220,13 @@ describe('sidecar', () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it('backfills transcript_synced_hash for rows that predate the column, from their existing source_hash', () => {
+    expectPreexistingRowIsBackfilled();
+  });
+
+  it('does not retroactively mark a not-yet-synced row as synced on a later reopen', () => {
+    expectMidflightRowSurvivesReopen();
   });
 });

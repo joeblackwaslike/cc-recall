@@ -14,6 +14,51 @@ import { type RecallRecord, parseRecallRecord } from '../record/schema.js';
 const DEFAULT_SEARCH_LIMIT = 20;
 const MAX_LIMIT = 1000;
 const IN_MEMORY = ':memory:';
+/**
+ * How long a connection waits on a lock held by another process before giving up.
+ *
+ * node:sqlite defaults `busy_timeout` to 0 — any lock contention (e.g. two `hooks/session-end.mjs`
+ * runs opening the same `index.db` at once) throws `SQLITE_BUSY: database is locked` immediately,
+ * confirmed by racing two real OS processes against a fresh pre-migration db. This has to be set
+ * as the very first statement on the connection, before the WAL pragma or `CREATE TABLE`, or the
+ * statements that establish the schema are themselves exposed to the race.
+ */
+const BUSY_TIMEOUT_MS = 5000;
+
+const OPEN_RETRY_ATTEMPTS = 10;
+const OPEN_RETRY_DELAY_MS = 25;
+/** One Int32 slot, all `Atomics.wait` needs regardless of the value stored in it. */
+const SYNC_SLEEP_BUFFER_BYTES = Int32Array.BYTES_PER_ELEMENT;
+
+/** Synchronous sleep — `node:sqlite` is a sync API, so an async delay can't sit between retries. */
+const sleepSync = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(SYNC_SLEEP_BUFFER_BYTES)), 0, 0, ms);
+};
+
+const isSqliteBusyError = (error: unknown): boolean =>
+  error instanceof Error && 'errstr' in error && error.errstr === 'database is locked';
+
+/**
+ * Retry a schema-setup statement through `SQLITE_BUSY`.
+ *
+ * `PRAGMA busy_timeout` (set immediately after opening the connection, below) covers most lock
+ * contention between two processes racing to open the same pre-existing `index.db`, but the
+ * `journal_mode = WAL` switch specifically can still return `SQLITE_BUSY: database is locked`
+ * without honouring it — confirmed empirically by racing two real OS processes against a fresh
+ * pre-migration db repeatedly: `busy_timeout` alone cut failures from every trial to roughly 1 in
+ * 5, and this retry loop around the whole open sequence was needed to close the rest.
+ */
+const execWithBusyRetry = (db: DatabaseSync, sql: string): void => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      db.exec(sql);
+      return;
+    } catch (error) {
+      if (!isSqliteBusyError(error) || attempt >= OPEN_RETRY_ATTEMPTS) throw error;
+      sleepSync(OPEN_RETRY_DELAY_MS);
+    }
+  }
+};
 
 const clampLimit = (limit: number): number =>
   Math.max(1, Math.min(Math.floor(limit) || DEFAULT_SEARCH_LIMIT, MAX_LIMIT));
@@ -44,7 +89,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
 `;
 
 /**
- * Add `transcript_synced_hash` to a `sessions` table that predates it.
+ * Add `transcript_synced_hash` to a `sessions` table that predates it, and backfill pre-existing
+ * rows so they read as already-synced rather than as a retry-gate miss.
  *
  * SQLite's `ALTER TABLE ... ADD COLUMN` has no `IF NOT EXISTS` clause (unlike Postgres) — running
  * it twice throws `duplicate column name`, confirmed against the node:sqlite-bundled SQLite
@@ -52,13 +98,39 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
  * of `CREATE TABLE IF NOT EXISTS sessions (...)`: that statement is a no-op against the live
  * production `index.db`, which already has a `sessions` table without this column — only an
  * explicit `ALTER TABLE`, run here on every `openSidecar` call, reaches it.
+ *
+ * Two OS processes can both pass the `pragma_table_info` check before either runs `ALTER TABLE`
+ * (e.g. two `hooks/session-end.mjs` runs racing on the same pre-migration `index.db`) — the loser
+ * hits `duplicate column name` on its own `ALTER TABLE`. That's not a real failure, just proof the
+ * other process already won the migration (and already ran the backfill below), so it is treated
+ * as a no-op rather than re-thrown.
+ *
+ * The backfill (`UPDATE ... WHERE transcript_synced_hash IS NULL`) only runs in the branch where
+ * *this* process's own `ALTER TABLE` just succeeded — never on the fast "column already exists"
+ * return above, and never in the race-loss branch. Every pre-existing row predates
+ * `transcript_synced_hash` entirely, so its transcript was written under the old code and is
+ * already correct; without this, the retry gate in `engine.ts` (`getTranscriptSyncedHash(id) ===
+ * sourceHash`) sees NULL for every one of them and re-synthesizes the entire corpus, LLM calls
+ * included, on the next backfill/repair pass. Running it unconditionally on every `openSidecar`
+ * call instead would be wrong the other way: it would stamp rows that are genuinely mid-flight
+ * (upserted but not yet transcript-synced) as synced, defeating the m32 retry-gate fix for new
+ * sessions too.
  */
 const migrateTranscriptSyncedHash = (db: DatabaseSync): void => {
   const columns = db.prepare("SELECT name FROM pragma_table_info('sessions')").all() as {
     name: string;
   }[];
   if (columns.some((column) => column.name === 'transcript_synced_hash')) return;
-  db.exec('ALTER TABLE sessions ADD COLUMN transcript_synced_hash TEXT;');
+  try {
+    execWithBusyRetry(db, 'ALTER TABLE sessions ADD COLUMN transcript_synced_hash TEXT;');
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('duplicate column name')) return;
+    throw error;
+  }
+  execWithBusyRetry(
+    db,
+    'UPDATE sessions SET transcript_synced_hash = source_hash WHERE transcript_synced_hash IS NULL;',
+  );
 };
 
 const UPSERT_SQL = `
@@ -297,8 +369,9 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
 export const openSidecar = (dbPath: string): Sidecar => {
   if (dbPath !== IN_MEMORY) mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  db.exec(SCHEMA_SQL);
+  db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
+  execWithBusyRetry(db, 'PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+  execWithBusyRetry(db, SCHEMA_SQL);
   migrateTranscriptSyncedHash(db);
   return buildSidecar(db, prepareStatements(db));
 };
