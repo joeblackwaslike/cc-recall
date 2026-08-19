@@ -9,12 +9,13 @@ import { type Sidecar, openSidecar } from './surfaces/sidecar.js';
 const PROJECT_DIR = '-Users-joe-proj';
 const SESSION = 's-e';
 const CWD = '/Users/joe/proj';
+const FIXTURE_TIMESTAMP = '2026-01-01T00:00:00.000Z';
 
 const transcript = `${JSON.stringify({
   type: 'user',
   sessionId: SESSION,
   cwd: CWD,
-  timestamp: '2026-01-01T00:00:00.000Z',
+  timestamp: FIXTURE_TIMESTAMP,
   message: { role: 'user', content: [{ type: 'text', text: 'wire up the engine' }] },
 })}\n`;
 
@@ -121,6 +122,58 @@ const expectActiveSessionSkipRetriesOnNextPass = async (
   expect(afterSecond).toContain(RECALL_RECORD_TYPE);
 };
 
+const GARBAGE_PROJECT_DIR = '-';
+
+const garbageTranscript = (sessionId: string): string =>
+  `${JSON.stringify({
+    type: 'user',
+    sessionId,
+    cwd: '/',
+    timestamp: FIXTURE_TIMESTAMP,
+    message: { role: 'user', content: [{ type: 'text', text: 'garbage' }] },
+  })}\n`;
+
+/**
+ * A session whose project dir is the degenerate slug "-" (Claude Code's encoding of a
+ * degenerate cwd like "/") must never be indexed (cc-recall-xkf).
+ */
+const expectGarbageProjectDirIsSkipped = async (
+  root: string,
+  sidecar: Sidecar,
+  baseDir: string,
+): Promise<void> => {
+  const garbageDir = path.join(root, GARBAGE_PROJECT_DIR);
+  mkdirSync(garbageDir, { recursive: true });
+  const garbageFile = path.join(garbageDir, 'ghost.jsonl');
+  writeFileSync(garbageFile, garbageTranscript('ghost'));
+  const past = new Date(Date.now() - ONE_HOUR_MS);
+  utimesSync(garbageFile, past, past);
+
+  const result = await indexSession(garbageFile, sidecar, { llm: false, baseDir });
+  expect(result.skipped).toBe(true);
+  expect(result.written).toBe(false);
+  expect(sidecar.get('ghost')).toBeUndefined();
+};
+
+/**
+ * Same bug, enumeration side: the garbage dir must never be enumerated at all, not merely
+ * skipped after being read (cc-recall-xkf).
+ */
+const expectGarbageProjectDirExcludedFromBackfill = async (
+  root: string,
+  sidecar: Sidecar,
+  baseDir: string,
+): Promise<void> => {
+  const garbageDir = path.join(root, GARBAGE_PROJECT_DIR);
+  mkdirSync(garbageDir, { recursive: true });
+  writeFileSync(path.join(garbageDir, 'ghost2.jsonl'), garbageTranscript('ghost2'));
+
+  const summary = await backfill(sidecar, { projectsRoot: root, baseDir, llm: false });
+  // Only the real fixture session from beforeEach should be counted — the garbage dir must
+  // never be enumerated at all, not merely skipped after being read.
+  expect(summary.total).toBe(1);
+};
+
 describe('engine', () => {
   let root: string;
   let baseDir: string;
@@ -201,6 +254,14 @@ describe('engine', () => {
     await expectActiveSessionSkipRetriesOnNextPass(file, sidecar, baseDir);
   });
 
+  it('skips a session whose project directory is the degenerate slug "-" (cc-recall-xkf)', async () => {
+    await expectGarbageProjectDirIsSkipped(root, sidecar, baseDir);
+  });
+
+  it('excludes the degenerate "-" project directory from backfill enumeration', async () => {
+    await expectGarbageProjectDirExcludedFromBackfill(root, sidecar, baseDir);
+  });
+
   it('backfill is idempotent across runs', async () => {
     const first = await backfill(sidecar, { projectsRoot: root, baseDir, llm: false });
     expect(first.written).toBe(1);
@@ -230,7 +291,7 @@ const seedBatch = (dir: string, count: number): void => {
         type: 'user',
         sessionId: id,
         cwd: CWD,
-        timestamp: '2026-01-01T00:00:00.000Z',
+        timestamp: FIXTURE_TIMESTAMP,
         message: { role: 'user', content: [{ type: 'text', text: `session ${index}` }] },
       })}\n`,
     );
