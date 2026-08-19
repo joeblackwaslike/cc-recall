@@ -199,22 +199,28 @@ const isIndexerRun = (
 /**
  * Claude Code encodes a degenerate cwd (e.g. the literal root `/`) into the literal project
  * directory name `-` — never a real project, since every real cwd is an absolute path with at
- * least one more path segment than that. ~44K such rows were manually purged from production
- * on 2026-08-15 (cc-recall-xkf); this stops new ones from being indexed at all rather than
- * relying on another manual cleanup.
+ * least one more path segment than that. `projectFromPath` can also yield `''` (a root-level
+ * file path, e.g. `/ghost.jsonl`) or `'.'` (a file path with no directory component at all,
+ * e.g. `ghost.jsonl`) — both are exactly as structurally invalid under the same invariant.
+ * ~44K `-` rows were manually purged from production on 2026-08-15 (cc-recall-xkf); this stops
+ * new ones — of any of these three shapes — from being indexed at all rather than relying on
+ * another manual cleanup.
  */
-const isGarbageProjectDir = (project: string): boolean => project === '-';
+const GARBAGE_PROJECT_DIRS = new Set(['-', '', '.']);
+const isGarbageProjectDir = (project: string): boolean => GARBAGE_PROJECT_DIRS.has(project);
 
 /**
- * Extracted out of `indexSession` to keep it under the `max-statements` cap, not just for reuse.
+ * Extracted solely to satisfy max-statements; there is no second caller — inline this back into
+ * indexSession if that constraint ever relaxes.
  */
-const garbageProjectSkip = (
+const skipGarbageProject = (
   filePath: string,
   sessionId: string,
+  project: string,
   options: IndexOptions,
 ): IndexResult => {
-  options.onWarn?.(`skipping session in the degenerate project dir "-": ${filePath}`);
-  return { sessionId, title: '(invalid project)', written: false, skipped: true };
+  options.onWarn?.(`skipping session in the degenerate project dir "${project}": ${filePath}`);
+  return { sessionId, title: '(degenerate project dir)', written: false, skipped: true };
 };
 
 export const indexSession = async (
@@ -226,7 +232,8 @@ export const indexSession = async (
   const parsed = parseTranscriptText(text, filePath);
   const project = projectFromPath(filePath);
 
-  if (isGarbageProjectDir(project)) return garbageProjectSkip(filePath, parsed.sessionId, options);
+  if (isGarbageProjectDir(project))
+    return skipGarbageProject(filePath, parsed.sessionId, project, options);
 
   if (isIndexerRun(project, parsed.firstUserPromptRaw, parsed.sessionId)) {
     return { sessionId: parsed.sessionId, title: '(indexer run)', written: false, skipped: true };

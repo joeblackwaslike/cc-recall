@@ -146,8 +146,6 @@ const expectGarbageProjectDirIsSkipped = async (
   mkdirSync(garbageDir, { recursive: true });
   const garbageFile = path.join(garbageDir, 'ghost.jsonl');
   writeFileSync(garbageFile, garbageTranscript('ghost'));
-  const past = new Date(Date.now() - ONE_HOUR_MS);
-  utimesSync(garbageFile, past, past);
 
   const result = await indexSession(garbageFile, sidecar, { llm: false, baseDir });
   expect(result.skipped).toBe(true);
@@ -172,6 +170,19 @@ const expectGarbageProjectDirExcludedFromBackfill = async (
   // Only the real fixture session from beforeEach should be counted — the garbage dir must
   // never be enumerated at all, not merely skipped after being read.
   expect(summary.total).toBe(1);
+};
+
+/**
+ * Same invariant as the "-" case, different degenerate value: a `/./` path segment with nothing
+ * after it makes `path.dirname` return a path ending in "." and `projectFromPath` return "."
+ * right along with it -- exactly as structurally invalid as "-" under the "every real cwd is an
+ * absolute path with at least one more path segment" invariant (cc-recall-xkf follow-up).
+ */
+const expectDotProjectDirIsSkipped = async (root: string, sidecar: Sidecar): Promise<void> => {
+  writeFileSync(`${root}/./ghost3.jsonl`, garbageTranscript('ghost3'));
+  const result = await indexSession(`${root}/./ghost3.jsonl`, sidecar, { llm: false });
+  expect(result).toMatchObject({ skipped: true, written: false });
+  expect(sidecar.get('ghost3')).toBeUndefined();
 };
 
 describe('engine', () => {
@@ -260,6 +271,10 @@ describe('engine', () => {
 
   it('excludes the degenerate "-" project directory from backfill enumeration', async () => {
     await expectGarbageProjectDirExcludedFromBackfill(root, sidecar, baseDir);
+  });
+
+  it('skips a session whose project directory resolves to "."', async () => {
+    await expectDotProjectDirIsSkipped(root, sidecar);
   });
 
   it('backfill is idempotent across runs', async () => {
