@@ -79,6 +79,48 @@ const expectStaleSourceSkipRetriesOnNextPass = async (
   expect(afterSecond).toContain(RECALL_RECORD_TYPE);
 };
 
+/**
+ * An active-session skip must not starve the retry forever either (cc-recall-m32). Unlike the
+ * stale-source path above, content does NOT change between passes here -- pass 2's source hash
+ * is byte-identical to pass 1's. That is exactly the condition under which the pre-fix guard
+ * (comparing only `sidecar.getSourceHash(id)` to the current hash) wrongly matched and skipped
+ * forever: pass 1's `sidecar.upsert` stamps that hash regardless of whether the transcript write
+ * itself lands, so a guard that doesn't also check `transcript_synced_hash` can't tell "already
+ * written" apart from "declined, never written."
+ */
+const expectActiveSessionSkipRetriesOnNextPass = async (
+  file: string,
+  sidecar: Sidecar,
+  baseDir: string,
+): Promise<void> => {
+  // Pass 1: undo the beforeEach backdate so the transcript's mtime looks fresh, well inside
+  // ACTIVE_SESSION_GRACE_MS -- this is what makes the writer's liveness heuristic decline the
+  // write with skipReason 'active-session' rather than 'stale-source' (content isn't changing).
+  utimesSync(file, new Date(), new Date());
+  const warnings: string[] = [];
+  const first = await indexSession(file, sidecar, {
+    baseDir,
+    llm: false,
+    onWarn: (m) => {
+      warnings.push(m);
+    },
+  });
+  expect(first.written).toBe(false);
+  expect(warnings.some((w) => w.includes('looked live'))).toBe(true);
+  const afterFirst = readFileSync(file, 'utf8');
+  expect(afterFirst).not.toContain(RECALL_RECORD_TYPE);
+
+  // Pass 2: age the mtime past the liveness threshold. Content is untouched -- byte-identical to
+  // pass 1 -- so the write must still happen: the transcript was never actually synced.
+  const past = new Date(Date.now() - ONE_HOUR_MS);
+  utimesSync(file, past, past);
+  const second = await indexSession(file, sidecar, { llm: false, baseDir });
+  expect(second.skipped).toBe(false);
+  expect(second.written).toBe(true);
+  const afterSecond = readFileSync(file, 'utf8');
+  expect(afterSecond).toContain(RECALL_RECORD_TYPE);
+};
+
 describe('engine', () => {
   let root: string;
   let baseDir: string;
@@ -153,6 +195,10 @@ describe('engine', () => {
 
   it('retries the transcript write on the next pass after a stale-source skip (cc-recall-m32)', async () => {
     await expectStaleSourceSkipRetriesOnNextPass(file, sidecar, baseDir);
+  });
+
+  it('retries the transcript write on the next pass after an active-session skip (cc-recall-m32)', async () => {
+    await expectActiveSessionSkipRetriesOnNextPass(file, sidecar, baseDir);
   });
 
   it('backfill is idempotent across runs', async () => {
