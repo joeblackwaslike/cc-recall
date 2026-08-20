@@ -332,8 +332,16 @@ const prepareStatements = (db: DatabaseSync): Statements => ({
   selectSyncedHash: db.prepare(
     'SELECT transcript_synced_hash FROM sessions WHERE session_id = $session_id',
   ),
+  // Conditioned on `source_hash` still matching `$hash`, not just `session_id`: two indexers can
+  // process the same session at once (e.g. a live SessionEnd hook racing a backfill pass), each
+  // capturing its own source_hash before an unpredictable delay (an LLM call vs. the heuristic
+  // fallback). Without the extra condition, a slower indexer finishing on stale content after a
+  // faster one has already upserted and confirmed newer content would stamp the row with its own
+  // now-stale hash, making a row that is genuinely synced read as unsynced and triggering an
+  // unnecessary resynthesis. A no-op here (rather than throwing) is correct: the row is still
+  // marked synced, just by whichever write actually matches its current content.
   markSynced: db.prepare(
-    'UPDATE sessions SET transcript_synced_hash = $hash WHERE session_id = $session_id',
+    'UPDATE sessions SET transcript_synced_hash = $hash WHERE session_id = $session_id AND source_hash = $hash',
   ),
   listAllStmt: db.prepare('SELECT record_json FROM sessions ORDER BY started_at'),
   searchStmt: db.prepare(

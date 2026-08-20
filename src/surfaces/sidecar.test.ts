@@ -142,6 +142,29 @@ const expectMidflightRowSurvivesReopen = (): void => {
   }
 };
 
+/**
+ * Two indexers processing the same session at once (e.g. a live SessionEnd hook racing a
+ * backfill pass) each capture their own source_hash up front, then take an unpredictable amount
+ * of wall-clock time (an LLM call vs. the heuristic fallback) before writing. If the slower one
+ * (indexer A, on stale content hash-1) finishes after the faster one (indexer B, on the current
+ * content hash-2) has already upserted and confirmed the write, A's markTranscriptSynced call
+ * must not stamp the row with its now-stale hash-1 — that would make a row that is genuinely
+ * synced at hash-2 read as unsynced (getTranscriptSyncedHash returning hash-1 while source_hash
+ * is hash-2), triggering an unnecessary resynthesis.
+ */
+const expectSlowWriterCannotDowngradeSync = (sidecar: Sidecar): void => {
+  const sessionId = 's-race-writers';
+  const record = recordFor(sessionId, ADD_FTS);
+  sidecar.upsert(record, 'hash-1'); // indexer A's capture of the (now-stale) content
+  sidecar.upsert(record, 'hash-2'); // indexer B: newer content already upserted and...
+  sidecar.markTranscriptSynced(sessionId, 'hash-2'); // ...confirmed synced
+
+  sidecar.markTranscriptSynced(sessionId, 'hash-1'); // indexer A finally catches up
+
+  expect(sidecar.getSourceHash(sessionId)).toBe('hash-2');
+  expect(sidecar.getTranscriptSyncedHash(sessionId)).toBe('hash-2');
+};
+
 interface WorkerResult {
   code: number | null;
   stderr: string;
@@ -230,7 +253,6 @@ const RACE_ABOUT_TO_MIGRATE_MARKER = 'ABOUT_TO_MIGRATE';
 const lockHolderScript = (lockedMarker: string): string =>
   [
     "import { readSync } from 'node:fs';",
-    "import { execFileSync } from 'node:child_process';",
     "import { DatabaseSync } from 'node:sqlite';",
     'const db = new DatabaseSync(process.argv[2]);',
     `db.exec(${JSON.stringify('PRAGMA busy_timeout = 5000;')});`,
@@ -243,7 +265,9 @@ const lockHolderScript = (lockedMarker: string): string =>
     // synchronous statements away (open the connection, two cheap already-set-mode pragmas, two
     // no-op "already exists" DDL statements) — comfortably under this buffer on any machine, but
     // not instant, so this still has to wait rather than proceed the moment `goLine` arrives.
-    "execFileSync('sleep', ['0.05']);",
+    // A Node-native blocking wait (matching the `sleepSync` pattern in sidecar.ts itself) rather
+    // than shelling out to the POSIX `sleep` binary, which doesn't exist on Windows.
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);',
     `db.exec(${JSON.stringify('ALTER TABLE sessions ADD COLUMN transcript_synced_hash TEXT;')});`,
     `db.exec(${JSON.stringify('UPDATE sessions SET transcript_synced_hash = source_hash WHERE transcript_synced_hash IS NULL;')});`,
     `db.exec(${JSON.stringify('COMMIT')});`,
@@ -436,6 +460,10 @@ describe('sidecar', () => {
     // still valid for the new content.
     sidecar.upsert(record, 'hash-2');
     expect(sidecar.getTranscriptSyncedHash('s-sync')).toBe('hash-1');
+  });
+
+  it("does not let a slow writer downgrade the sync marker past a newer indexer's result", () => {
+    expectSlowWriterCannotDowngradeSync(sidecar);
   });
 
   it('migrates an existing on-disk database that predates transcript_synced_hash', () => {
