@@ -142,25 +142,191 @@ const expectMidflightRowSurvivesReopen = (): void => {
   }
 };
 
-/** Runs `open-sidecar-worker.mjs` as a real child process via the project's `tsx` loader (already
- * a devDependency) so it can import `sidecar.ts` directly, without a build step. */
-const runOpenSidecarWorker = (
-  workerPath: string,
-  dbPath: string,
-): Promise<{ code: number | null; stderr: string }> =>
-  new Promise((resolve) => {
-    const child = spawn(process.execPath, ['--import', 'tsx/esm', workerPath, dbPath], {
-      cwd: path.resolve(import.meta.dirname, '..', '..'),
-      stdio: ['ignore', 'ignore', 'pipe'],
+interface WorkerResult {
+  code: number | null;
+  stderr: string;
+}
+
+interface SpawnedWorker {
+  /** Resolves once the child's stdout has emitted `readyMarker` (immediately, if none given). */
+  ready: Promise<void>;
+  /** Resolves once the child exits, with its exit code and accumulated stderr. */
+  done: Promise<WorkerResult>;
+  /** Writes a line to the child's stdin. Only meaningful when spawned with `stdin: 'pipe'`. */
+  sendLine: (line: string) => void;
+}
+
+/** Spawns `scriptPath` as a real child process. `useTsx` routes it through the project's `tsx`
+ * loader (already a devDependency) so a worker can import `sidecar.ts` directly, no build step;
+ * the lock-holder below needs only `node:sqlite`, so it skips that and starts faster. Stdin is
+ * inherited-closed (`'ignore'`) by default; pass `stdin: 'pipe'` for a worker that blocks reading
+ * its own stdin for a go-ahead signal, as the lock-holder script does. */
+const spawnWorker = (
+  scriptPath: string,
+  args: string[],
+  {
+    useTsx = false,
+    readyMarker,
+    stdin = 'ignore',
+  }: { useTsx?: boolean; readyMarker?: string; stdin?: 'ignore' | 'pipe' } = {},
+): SpawnedWorker => {
+  const nodeArgs = useTsx ? ['--import', 'tsx/esm', scriptPath, ...args] : [scriptPath, ...args];
+  const child = spawn(process.execPath, nodeArgs, {
+    cwd: path.resolve(import.meta.dirname, '..', '..'),
+    stdio: [stdin, 'pipe', 'pipe'],
+  });
+  // `stdio` is a runtime-computed tuple, so TypeScript can't narrow `child.stdout`/`child.stderr`
+  // to non-null the way it does for the `'pipe', 'pipe', 'pipe'` literal overload — both
+  // positions are always `'pipe'` above regardless of `stdin`, so they're always present.
+  const stdout = child.stdout as NodeJS.ReadableStream;
+  const stderr_ = child.stderr as NodeJS.ReadableStream;
+
+  let stdoutBuffered = '';
+  const ready = new Promise<void>((resolve) => {
+    if (!readyMarker) {
+      resolve();
+      return;
+    }
+    stdout.on('data', (chunk: Buffer) => {
+      stdoutBuffered += chunk.toString();
+      if (stdoutBuffered.includes(readyMarker)) resolve();
     });
-    let stderr = '';
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
+  });
+
+  let stderr = '';
+  stderr_.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
+  const done = new Promise<WorkerResult>((resolve) => {
     child.on('close', (code) => {
       resolve({ code, stderr });
     });
   });
+
+  const sendLine = (line: string): void => {
+    child.stdin?.write(`${line}\n`);
+  };
+
+  return { ready, done, sendLine };
+};
+
+const RACE_LOCKED_MARKER = 'LOCKED';
+const RACE_ABOUT_TO_MIGRATE_MARKER = 'ABOUT_TO_MIGRATE';
+
+/**
+ * The pre-migration-db lock-holder worker's script: takes `BEGIN IMMEDIATE`, announces it over
+ * stdout, then blocks synchronously reading its own stdin for a go-ahead line before running the
+ * exact migration statements `migrateTranscriptSyncedHash` runs and committing.
+ *
+ * Waiting on a signal from the opener (see `openerScript` below), rather than sleeping a guessed
+ * duration, is what makes the race deterministic: a fixed sleep has to outguess the opener's
+ * process-spawn-plus-`tsx`-transform startup cost, which is both large and variable across
+ * machines. The handshake removes that variable entirely — this worker simply cannot proceed
+ * until the opener has confirmed it is already running.
+ *
+ * Built from `JSON.stringify`d SQL strings rather than hand-escaped ones so the SQL's own quoting
+ * never has to match the surrounding JS quoting.
+ */
+const lockHolderScript = (lockedMarker: string): string =>
+  [
+    "import { readSync } from 'node:fs';",
+    "import { execFileSync } from 'node:child_process';",
+    "import { DatabaseSync } from 'node:sqlite';",
+    'const db = new DatabaseSync(process.argv[2]);',
+    `db.exec(${JSON.stringify('PRAGMA busy_timeout = 5000;')});`,
+    `db.exec(${JSON.stringify('BEGIN IMMEDIATE')});`,
+    `process.stdout.write(${JSON.stringify(lockedMarker.concat('\n'))});`,
+    'const goBuf = Buffer.alloc(64);',
+    'let goLine = "";',
+    String.raw`while (!goLine.includes("\n")) { goLine += goBuf.toString("utf8", 0, readSync(0, goBuf, 0, goBuf.length, null)); }`,
+    // The opener has confirmed it is running, but its own migration check is still a handful of
+    // synchronous statements away (open the connection, two cheap already-set-mode pragmas, two
+    // no-op "already exists" DDL statements) — comfortably under this buffer on any machine, but
+    // not instant, so this still has to wait rather than proceed the moment `goLine` arrives.
+    "execFileSync('sleep', ['0.05']);",
+    `db.exec(${JSON.stringify('ALTER TABLE sessions ADD COLUMN transcript_synced_hash TEXT;')});`,
+    `db.exec(${JSON.stringify('UPDATE sessions SET transcript_synced_hash = source_hash WHERE transcript_synced_hash IS NULL;')});`,
+    `db.exec(${JSON.stringify('COMMIT')});`,
+    'db.close();',
+  ].join('\n');
+
+/** The opener worker's script: announces it is about to call the real `openSidecar` — the
+ * lock-holder above waits for exactly this signal — then makes the call. */
+const openerScript = (sidecarPath: string, aboutToMigrateMarker: string): string =>
+  [
+    `import { openSidecar } from ${JSON.stringify(sidecarPath)};`,
+    `process.stdout.write(${JSON.stringify(aboutToMigrateMarker.concat('\n'))});`,
+    'openSidecar(process.argv[2]).close();',
+  ].join('\n');
+
+/** Writes the two worker scripts used by the concurrent-migration race test into `tmp` and
+ * returns their paths. */
+const writeRaceWorkerScripts = (tmp: string): { lockHolderPath: string; openerPath: string } => {
+  const lockHolderPath = path.join(tmp, 'lock-holder-worker.mjs');
+  writeFileSync(lockHolderPath, lockHolderScript(RACE_LOCKED_MARKER));
+
+  const sidecarPath = path.join(import.meta.dirname, 'sidecar.ts');
+  const openerPath = path.join(tmp, 'open-sidecar-worker.mjs');
+  writeFileSync(openerPath, openerScript(sidecarPath, RACE_ABOUT_TO_MIGRATE_MARKER));
+
+  return { lockHolderPath, openerPath };
+};
+
+/**
+ * Brings `dbPath` up to the steady state of a real, already-bootstrapped `index.db` that simply
+ * predates the `transcript_synced_hash` column — WAL mode, and every other object `SCHEMA_SQL`
+ * creates already present — so the only schema change left for the race below is the one
+ * `migrateTranscriptSyncedHash` itself makes.
+ *
+ * Both gaps this closes serialize the opener's *entire* `openSidecar` setup behind the
+ * lock-holder's commit, not just the final `ALTER TABLE`, which made the race unwinnable
+ * regardless of handshake timing — confirmed by instrumenting a standalone repro of this exact
+ * scenario before writing this fix:
+ * - Rollback-journal mode (SQLite's default, and what a bare `new DatabaseSync` leaves a
+ *   never-before-opened file in): the opener's own `PRAGMA journal_mode = WAL` needs exclusive
+ *   access to actually change modes, unlike a same-mode no-op.
+ * - A missing `sessions_fts` table: `openSidecar`'s `CREATE VIRTUAL TABLE IF NOT EXISTS
+ *   sessions_fts` is only a true no-op if the table already exists; creating it from scratch is
+ *   real DDL and needs the same exclusive access.
+ *
+ * `insertPreMigrationRow` (used by the sequential migration tests elsewhere in this file) doesn't
+ * need either of these, since nothing else runs concurrently against the db it writes.
+ */
+const warmUpToProductionStableSchema = (dbPath: string): void => {
+  const db = new DatabaseSync(dbPath);
+  db.exec('PRAGMA journal_mode = WAL;');
+  db.exec(
+    'CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(session_id UNINDEXED, title, summary, facets, phrases, files);',
+  );
+  db.close();
+};
+
+/** Runs the lock-holder/opener handshake described above and returns both workers' results. */
+const runConcurrentMigrationRace = async (
+  dbPath: string,
+  lockHolderPath: string,
+  openerPath: string,
+): Promise<{ lockHolderResult: WorkerResult; openerResult: WorkerResult }> => {
+  const lockHolder = spawnWorker(lockHolderPath, [dbPath], {
+    readyMarker: RACE_LOCKED_MARKER,
+    stdin: 'pipe',
+  });
+  // Only spawn the real opener once the lock-holder has actually taken the lock — otherwise this
+  // is just two processes hoping to overlap, which is the exact flakiness this test exists to
+  // remove.
+  await lockHolder.ready;
+  const opener = spawnWorker(openerPath, [dbPath], {
+    useTsx: true,
+    readyMarker: RACE_ABOUT_TO_MIGRATE_MARKER,
+  });
+  // Only release the lock-holder once the opener has confirmed it is about to call the real
+  // `openSidecar` — the other half of the handshake that replaces a guessed sleep.
+  await opener.ready;
+  lockHolder.sendLine('GO');
+
+  const [lockHolderResult, openerResult] = await Promise.all([lockHolder.done, opener.done]);
+  return { lockHolderResult, openerResult };
+};
 
 /**
  * `migrateTranscriptSyncedHash`'s busy-retry-then-rollback handling exists specifically for two
@@ -169,35 +335,38 @@ const runOpenSidecarWorker = (
  * claim can only be tested with genuine OS-level concurrency: `node:sqlite`'s `DatabaseSync` API
  * is synchronous, so two `openSidecar` calls on one JS thread can never actually overlap — the
  * first always finishes before the second starts, which would only ever exercise the harmless
- * "column already exists" fast path. Two real child processes, launched together and awaited
- * together, can genuinely contend for the same file lock the way two `SessionEnd` hooks do in
- * production.
+ * "column already exists" fast path.
  *
- * Regardless of which process wins the race, both must exit cleanly (never crash with
- * `SQLITE_BUSY` or a stuck transaction) and the end state must be correct exactly once — the
- * failure mode this guards is losing that safety in a future refactor of the busy-retry/rollback
- * logic.
+ * Two independently-spawned processes merely started together aren't enough either — process
+ * startup jitter (and the tsx loader's own transform cost) can just as easily let one finish its
+ * entire migration before the other even opens the file, which would exercise the same harmless
+ * fast path and silently stop testing anything. So one worker deliberately wins the race: it
+ * takes `BEGIN IMMEDIATE` on the pre-migration db itself, signals over stdout once it holds that
+ * lock, and only then does the test spawn the real `openSidecar` worker — which is guaranteed to
+ * hit `SQLITE_BUSY` on its own `BEGIN IMMEDIATE` (retried via `withBusyRetry`) and then `duplicate
+ * column name` on its `ALTER TABLE` once the lock-holder commits first. That is the exact
+ * interleaving `migrateTranscriptSyncedHash`'s narrow ROLLBACK-message match and busy-retry loop
+ * exist for, made deterministic instead of hoping two spawns happen to land in that window.
+ *
+ * The real `openSidecar` worker must still exit cleanly (never crash with `SQLITE_BUSY` or a
+ * stuck transaction) and the end state must be correct exactly once — the failure mode this
+ * guards is losing that safety in a future refactor of the busy-retry/rollback logic.
  */
 const expectConcurrentOpenersBothSucceed = async (): Promise<void> => {
   const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-sidecar-race-'));
   const dbPath = path.join(tmp, 'index.db');
   try {
     insertPreMigrationRow(dbPath, recordFor('s-race', ADD_FTS), 'race-hash');
-
-    const sidecarPath = path.join(import.meta.dirname, 'sidecar.ts');
-    const workerPath = path.join(tmp, 'open-sidecar-worker.mjs');
-    writeFileSync(
-      workerPath,
-      `import { openSidecar } from ${JSON.stringify(sidecarPath)};\nopenSidecar(process.argv[2]).close();\n`,
+    warmUpToProductionStableSchema(dbPath);
+    const { lockHolderPath, openerPath } = writeRaceWorkerScripts(tmp);
+    const { lockHolderResult, openerResult } = await runConcurrentMigrationRace(
+      dbPath,
+      lockHolderPath,
+      openerPath,
     );
 
-    const [first, second] = await Promise.all([
-      runOpenSidecarWorker(workerPath, dbPath),
-      runOpenSidecarWorker(workerPath, dbPath),
-    ]);
-
-    expect({ code: first.code, stderr: first.stderr }).toEqual({ code: 0, stderr: '' });
-    expect({ code: second.code, stderr: second.stderr }).toEqual({ code: 0, stderr: '' });
+    expect(lockHolderResult).toEqual({ code: 0, stderr: '' });
+    expect(openerResult).toEqual({ code: 0, stderr: '' });
 
     const verify = openSidecar(dbPath);
     try {
