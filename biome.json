@@ -62,6 +62,7 @@
     {
       "include": [
         "src/surfaces/sidecar.ts",
+        "src/surfaces/sidecar.test.ts",
         "src/surfaces/claude-mem.ts",
         "src/surfaces/claude-mem.test.ts"
       ],

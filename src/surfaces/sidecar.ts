@@ -14,6 +14,83 @@ import { type RecallRecord, parseRecallRecord } from '../record/schema.js';
 const DEFAULT_SEARCH_LIMIT = 20;
 const MAX_LIMIT = 1000;
 const IN_MEMORY = ':memory:';
+/**
+ * How long a connection waits on a lock held by another process before giving up.
+ *
+ * node:sqlite defaults `busy_timeout` to 0 — any lock contention (e.g. two `hooks/session-end.mjs`
+ * runs opening the same `index.db` at once) throws `SQLITE_BUSY: database is locked` immediately,
+ * confirmed by racing two real OS processes against a fresh pre-migration db. This has to be set
+ * as the very first statement on the connection, before the WAL pragma or `CREATE TABLE`, or the
+ * statements that establish the schema are themselves exposed to the race.
+ */
+const BUSY_TIMEOUT_MS = 5000;
+
+const OPEN_RETRY_ATTEMPTS = 10;
+const OPEN_RETRY_DELAY_MS = 25;
+/** The buffer is zero-initialized; `Atomics.wait` expects slot 0 to equal 0 and sleeps for `ms` ms before returning `'timed-out'`. */
+const SYNC_SLEEP_BUFFER_BYTES = Int32Array.BYTES_PER_ELEMENT;
+
+/** Synchronous sleep — `node:sqlite` is a sync API, so an async delay can't sit between retries. */
+const sleepSync = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(SYNC_SLEEP_BUFFER_BYTES)), 0, 0, ms);
+};
+
+/** SQLite's own error code for `SQLITE_BUSY`, per https://www.sqlite.org/rescode.html#busy. */
+const SQLITE_BUSY_ERRCODE = 5;
+
+/**
+ * Match on the documented Node error code (`ERR_SQLITE_ERROR`, per
+ * https://nodejs.org/api/errors.html#err_sqlite_error) plus the SQLite result code carried in
+ * `error.errcode`, not `code` alone — `ERR_SQLITE_ERROR` covers every SQLite error (schema
+ * errors, constraint violations, corruption), not just `SQLITE_BUSY`, so `errcode` is what pins
+ * this to the one condition the retry loop exists for.
+ *
+ * `errcode` (and its sibling `errstr`) are not part of any documented node:sqlite contract —
+ * neither https://nodejs.org/api/sqlite.html nor the `ERR_SQLITE_ERROR` entry above documents
+ * them, confirmed by reading both pages directly. They are, however, set deliberately in Node's
+ * own native binding (`src/node_sqlite.cc`, via `sqlite3_extended_errcode`) rather than being an
+ * accidental artifact, and were confirmed present on real thrown errors by probing node:sqlite
+ * directly against Node v26 / bundled SQLite 3.53.2. Node's binding never enables SQLite's
+ * extended-result-codes mode (no `sqlite3_extended_result_codes` call in that source file), so
+ * `errcode` stays pinned to the base result code (`5`) for every `SQLITE_BUSY` variant rather
+ * than splitting into extended codes like `SQLITE_BUSY_RECOVERY` (261) or `SQLITE_BUSY_SNAPSHOT`
+ * (517) — verified empirically, not guaranteed by any spec, so a future Node/node:sqlite version
+ * could change or drop this property without notice.
+ */
+const isSqliteBusyError = (error: unknown): boolean =>
+  error instanceof Error &&
+  'code' in error &&
+  error.code === 'ERR_SQLITE_ERROR' &&
+  'errcode' in error &&
+  error.errcode === SQLITE_BUSY_ERRCODE;
+
+/**
+ * Retry an action through `SQLITE_BUSY`.
+ *
+ * `PRAGMA busy_timeout` (set immediately after opening the connection, below) covers most lock
+ * contention between two processes racing to open the same pre-existing `index.db`, but the
+ * `journal_mode = WAL` switch specifically can still return `SQLITE_BUSY: database is locked`
+ * without honouring it — confirmed empirically by racing two real OS processes against a fresh
+ * pre-migration db repeatedly: `busy_timeout` alone cut failures from every trial to roughly 1 in
+ * 5, and this retry loop around the whole open sequence was needed to close the rest.
+ */
+const withBusyRetry = <T>(action: () => T): T => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return action();
+    } catch (error) {
+      if (!isSqliteBusyError(error)) throw error;
+      if (attempt >= OPEN_RETRY_ATTEMPTS) throw error;
+      sleepSync(OPEN_RETRY_DELAY_MS);
+    }
+  }
+};
+
+const execWithBusyRetry = (db: DatabaseSync, sql: string): void => {
+  withBusyRetry(() => {
+    db.exec(sql);
+  });
+};
 
 const clampLimit = (limit: number): number =>
   Math.max(1, Math.min(Math.floor(limit) || DEFAULT_SEARCH_LIMIT, MAX_LIMIT));
@@ -42,6 +119,95 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
   session_id UNINDEXED, title, summary, facets, phrases, files
 );
 `;
+
+/**
+ * Add `transcript_synced_hash` to a `sessions` table that predates it, and backfill pre-existing
+ * rows so they read as already-synced rather than as a retry-gate miss.
+ *
+ * SQLite's `ALTER TABLE ... ADD COLUMN` has no `IF NOT EXISTS` clause (unlike Postgres) — running
+ * it twice throws `duplicate column name`, confirmed against the node:sqlite-bundled SQLite
+ * 3.53.2. So this checks `pragma_table_info` first and only migrates once. Deliberately not part
+ * of `CREATE TABLE IF NOT EXISTS sessions (...)`: that statement is a no-op against the live
+ * production `index.db`, which already has a `sessions` table without this column — only an
+ * explicit `ALTER TABLE`, run here on every `openSidecar` call, reaches it.
+ *
+ * `ALTER TABLE ... ADD COLUMN` and the backfill `UPDATE` run inside a single `BEGIN
+ * IMMEDIATE ... COMMIT` transaction, specifically so column existence stays a trustworthy
+ * completion marker: SQLite's DDL is transactional, so if this process is killed between the two
+ * statements, the whole transaction — including the `ALTER TABLE` — rolls back, and the column
+ * still doesn't exist on the next `openSidecar` call. Without that atomicity, a crash in that
+ * window would leave the column present but every pre-existing row permanently un-backfilled,
+ * since every future call takes the fast "column already exists" return above and the backfill
+ * would never run again.
+ *
+ * Two OS processes can both pass the `pragma_table_info` check before either runs `ALTER TABLE`
+ * (e.g. two `hooks/session-end.mjs` runs racing on the same pre-migration `index.db`) — the loser
+ * hits `duplicate column name` on its own `ALTER TABLE`. Because the transaction is atomic, that
+ * failure is proof the other process's *entire* migration (`ALTER TABLE` + backfill `UPDATE`)
+ * already committed — never a partial win — so the loser rolls back its own no-op transaction and
+ * returns rather than re-throwing or re-running the backfill itself.
+ *
+ * The backfill (`UPDATE ... WHERE transcript_synced_hash IS NULL`) only runs in the branch where
+ * *this* process's own `ALTER TABLE` just succeeded — never on the fast "column already exists"
+ * return above, and never in the race-loss branch. Every pre-existing row predates
+ * `transcript_synced_hash` entirely, so its transcript was written under the old code and is
+ * already correct; without this, the retry gate in `engine.ts` (`getTranscriptSyncedHash(id) ===
+ * sourceHash`) sees NULL for every one of them and re-synthesizes the entire corpus, LLM calls
+ * included, on the next backfill/repair pass. Running it unconditionally on every `openSidecar`
+ * call instead would be wrong the other way: it would stamp rows that are genuinely mid-flight
+ * (upserted but not yet transcript-synced) as synced, defeating the m32 retry-gate fix for new
+ * sessions too.
+ */
+/** SQLite's exact wording when ROLLBACK runs with no transaction open — confirmed empirically
+ * against the node:sqlite-bundled SQLite 3.53.2 (`db.exec('ROLLBACK')` on a connection with no
+ * active transaction throws this precise message under `ERR_SQLITE_ERROR`). Matched narrowly so
+ * a rollback failure for any other reason (disk I/O, corruption) surfaces instead of vanishing. */
+const ROLLBACK_NO_TRANSACTION_MESSAGE = 'cannot rollback - no transaction is active';
+
+const migrateTranscriptSyncedHash = (db: DatabaseSync): void => {
+  const columns = withBusyRetry(
+    () => db.prepare("SELECT name FROM pragma_table_info('sessions')").all() as { name: string }[],
+  );
+  if (columns.some((column) => column.name === 'transcript_synced_hash')) return;
+
+  withBusyRetry(() => {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.exec('ALTER TABLE sessions ADD COLUMN transcript_synced_hash TEXT;');
+      db.exec(
+        'UPDATE sessions SET transcript_synced_hash = source_hash WHERE transcript_synced_hash IS NULL;',
+      );
+      db.exec('COMMIT');
+    } catch (error) {
+      // Rolling back here, rather than only on the ALTER TABLE failure, matters for retry
+      // correctness: if UPDATE or COMMIT throws SQLITE_BUSY instead of ALTER TABLE, the
+      // transaction opened by BEGIN IMMEDIATE above is still open when withBusyRetry's outer
+      // catch retries this whole action. Without an explicit ROLLBACK first, the retried
+      // attempt's own BEGIN IMMEDIATE fails with "cannot start a transaction within a
+      // transaction" — a non-busy error that withBusyRetry doesn't retry — turning transient
+      // lock contention into a hard `openSidecar` failure instead of a clean retry. Confirmed
+      // with a fake-db repro forcing SQLITE_BUSY on the UPDATE and on the COMMIT: without this,
+      // both wedge on the immediately-following BEGIN; with it, both retry and succeed.
+      try {
+        db.exec('ROLLBACK');
+      } catch (rollbackError) {
+        // SQLite can abort the transaction implicitly for some error classes (e.g. I/O
+        // failure), in which case ROLLBACK itself throws this exact message — expected, and
+        // must not mask the real `error` being handled below. Anything else from ROLLBACK is
+        // itself a genuine failure (e.g. the db file became unwritable mid-transaction) and
+        // must not be swallowed just because it happened inside this catch block.
+        if (
+          !(rollbackError instanceof Error) ||
+          rollbackError.message !== ROLLBACK_NO_TRANSACTION_MESSAGE
+        ) {
+          throw new Error('ROLLBACK failed after a migration error', { cause: rollbackError });
+        }
+      }
+      if (error instanceof Error && error.message.includes('duplicate column name')) return;
+      throw error;
+    }
+  });
+};
 
 const UPSERT_SQL = `
 INSERT INTO sessions (
@@ -78,6 +244,8 @@ export interface Sidecar {
   upsert: (record: RecallRecord, sourceHash?: string) => void;
   get: (sessionId: string) => RecallRecord | undefined;
   getSourceHash: (sessionId: string) => string | undefined;
+  getTranscriptSyncedHash: (sessionId: string) => string | undefined;
+  markTranscriptSynced: (sessionId: string, sourceHash: string) => void;
   search: (query: string, limit?: number) => SearchHit[];
   /** Every record in the store, ordered by started_at (for batch lineage resolution). */
   listAll: () => RecallRecord[];
@@ -144,6 +312,8 @@ interface Statements {
   deleteFts: StatementSync;
   selectOne: StatementSync;
   selectHash: StatementSync;
+  selectSyncedHash: StatementSync;
+  markSynced: StatementSync;
   listAllStmt: StatementSync;
   searchStmt: StatementSync;
   topStmt: StatementSync;
@@ -159,6 +329,20 @@ const prepareStatements = (db: DatabaseSync): Statements => ({
   deleteFts: db.prepare('DELETE FROM sessions_fts WHERE session_id = $session_id'),
   selectOne: db.prepare('SELECT record_json FROM sessions WHERE session_id = $session_id'),
   selectHash: db.prepare('SELECT source_hash FROM sessions WHERE session_id = $session_id'),
+  selectSyncedHash: db.prepare(
+    'SELECT transcript_synced_hash FROM sessions WHERE session_id = $session_id',
+  ),
+  // Conditioned on `source_hash` still matching `$hash`, not just `session_id`: two indexers can
+  // process the same session at once (e.g. a live SessionEnd hook racing a backfill pass), each
+  // capturing its own source_hash before an unpredictable delay (an LLM call vs. the heuristic
+  // fallback). Without the extra condition, a slower indexer finishing on stale content after a
+  // faster one has already upserted and confirmed newer content would stamp the row with its own
+  // now-stale hash, making a row that is genuinely synced read as unsynced and triggering an
+  // unnecessary resynthesis. A no-op here (rather than throwing) is correct: the row is still
+  // marked synced, just by whichever write actually matches its current content.
+  markSynced: db.prepare(
+    'UPDATE sessions SET transcript_synced_hash = $hash WHERE session_id = $session_id AND source_hash = $hash',
+  ),
   listAllStmt: db.prepare('SELECT record_json FROM sessions ORDER BY started_at'),
   searchStmt: db.prepare(
     `SELECT s.record_json AS record_json, bm25(sessions_fts) AS score
@@ -171,6 +355,18 @@ const prepareStatements = (db: DatabaseSync): Statements => ({
   countStmt: db.prepare('SELECT count(*) AS total FROM sessions'),
   provStmt: db.prepare('SELECT provenance, count(*) AS n FROM sessions GROUP BY provenance'),
 });
+
+/** Read a single nullable TEXT column from a `session_id`-keyed statement. */
+const selectOptionalString = (
+  preparedStatement: StatementSync,
+  sessionId: string,
+  column: 'source_hash' | 'transcript_synced_hash',
+): string | undefined => {
+  const row = preparedStatement.get({ $session_id: sessionId }) as
+    | Record<string, string | null>
+    | undefined;
+  return row?.[column] ?? undefined;
+};
 
 const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
   upsert(record, sourceHash) {
@@ -200,10 +396,13 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
     return row ? parseRecallRecord(JSON.parse(row.record_json)) : undefined;
   },
   getSourceHash(sessionId) {
-    const row = statement.selectHash.get({ $session_id: sessionId }) as
-      | undefined
-      | { source_hash: string | null };
-    return row?.source_hash ?? undefined;
+    return selectOptionalString(statement.selectHash, sessionId, 'source_hash');
+  },
+  getTranscriptSyncedHash(sessionId) {
+    return selectOptionalString(statement.selectSyncedHash, sessionId, 'transcript_synced_hash');
+  },
+  markTranscriptSynced(sessionId, sourceHash) {
+    statement.markSynced.run({ $session_id: sessionId, $hash: sourceHash });
   },
   listAll() {
     const rows = statement.listAllStmt.all() as { record_json: string }[];
@@ -254,7 +453,18 @@ const buildSidecar = (db: DatabaseSync, statement: Statements): Sidecar => ({
 export const openSidecar = (dbPath: string): Sidecar => {
   if (dbPath !== IN_MEMORY) mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  db.exec(SCHEMA_SQL);
-  return buildSidecar(db, prepareStatements(db));
+  try {
+    db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS};`);
+    execWithBusyRetry(db, 'PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
+    execWithBusyRetry(db, SCHEMA_SQL);
+    migrateTranscriptSyncedHash(db);
+    return buildSidecar(db, prepareStatements(db));
+  } catch (error) {
+    // Every setup step above can throw (busy_timeout, WAL setup, schema exec, migration) — if any
+    // does, the connection must not leak. An open-but-unusable handle left alive in-process turns
+    // a transient setup failure into follow-on SQLITE_BUSY errors for every later `openSidecar`
+    // call against the same file, which is much harder to diagnose than the original error.
+    db.close();
+    throw new Error(`Failed to open sidecar database at ${dbPath}`, { cause: error });
+  }
 };
