@@ -158,10 +158,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
  * (upserted but not yet transcript-synced) as synced, defeating the m32 retry-gate fix for new
  * sessions too.
  */
+/** SQLite's exact wording when ROLLBACK runs with no transaction open — confirmed empirically
+ * against the node:sqlite-bundled SQLite 3.53.2 (`db.exec('ROLLBACK')` on a connection with no
+ * active transaction throws this precise message under `ERR_SQLITE_ERROR`). Matched narrowly so
+ * a rollback failure for any other reason (disk I/O, corruption) surfaces instead of vanishing. */
+const ROLLBACK_NO_TRANSACTION_MESSAGE = 'cannot rollback - no transaction is active';
+
 const migrateTranscriptSyncedHash = (db: DatabaseSync): void => {
-  const columns = db.prepare("SELECT name FROM pragma_table_info('sessions')").all() as {
-    name: string;
-  }[];
+  const columns = withBusyRetry(
+    () => db.prepare("SELECT name FROM pragma_table_info('sessions')").all() as { name: string }[],
+  );
   if (columns.some((column) => column.name === 'transcript_synced_hash')) return;
 
   withBusyRetry(() => {
@@ -173,22 +179,29 @@ const migrateTranscriptSyncedHash = (db: DatabaseSync): void => {
       );
       db.exec('COMMIT');
     } catch (error) {
-      // ROLLBACK itself can throw "no transaction is active" if SQLite already aborted the
-      // transaction implicitly for some error classes (e.g. I/O failure) — swallow that so it
-      // can't mask the real error being handled below. Rolling back here, rather than only on
-      // the ALTER TABLE failure, matters for retry correctness: if UPDATE or COMMIT throws
-      // SQLITE_BUSY instead of ALTER TABLE, the transaction opened by BEGIN IMMEDIATE above is
-      // still open when withBusyRetry's outer catch retries this whole action. Without an
-      // explicit ROLLBACK first, the retried attempt's own BEGIN IMMEDIATE fails with "cannot
-      // start a transaction within a transaction" — a non-busy error that withBusyRetry doesn't
-      // retry — turning transient lock contention into a hard `openSidecar` failure instead of a
-      // clean retry. Confirmed with a fake-db repro forcing SQLITE_BUSY on the UPDATE and on the
-      // COMMIT: without this, both wedge on the immediately-following BEGIN; with it, both retry
-      // and succeed.
+      // Rolling back here, rather than only on the ALTER TABLE failure, matters for retry
+      // correctness: if UPDATE or COMMIT throws SQLITE_BUSY instead of ALTER TABLE, the
+      // transaction opened by BEGIN IMMEDIATE above is still open when withBusyRetry's outer
+      // catch retries this whole action. Without an explicit ROLLBACK first, the retried
+      // attempt's own BEGIN IMMEDIATE fails with "cannot start a transaction within a
+      // transaction" — a non-busy error that withBusyRetry doesn't retry — turning transient
+      // lock contention into a hard `openSidecar` failure instead of a clean retry. Confirmed
+      // with a fake-db repro forcing SQLITE_BUSY on the UPDATE and on the COMMIT: without this,
+      // both wedge on the immediately-following BEGIN; with it, both retry and succeed.
       try {
         db.exec('ROLLBACK');
-      } catch {
-        // transaction already gone; nothing to undo
+      } catch (rollbackError) {
+        // SQLite can abort the transaction implicitly for some error classes (e.g. I/O
+        // failure), in which case ROLLBACK itself throws this exact message — expected, and
+        // must not mask the real `error` being handled below. Anything else from ROLLBACK is
+        // itself a genuine failure (e.g. the db file became unwritable mid-transaction) and
+        // must not be swallowed just because it happened inside this catch block.
+        if (
+          !(rollbackError instanceof Error) ||
+          rollbackError.message !== ROLLBACK_NO_TRANSACTION_MESSAGE
+        ) {
+          throw new Error('ROLLBACK failed after a migration error', { cause: rollbackError });
+        }
       }
       if (error instanceof Error && error.message.includes('duplicate column name')) return;
       throw error;
