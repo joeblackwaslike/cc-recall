@@ -193,7 +193,14 @@ const spawnWorker = (
     stdin = 'ignore',
   }: { useTsx?: boolean; readyMarker?: string; stdin?: 'ignore' | 'pipe' } = {},
 ): SpawnedWorker => {
-  const nodeArgs = useTsx ? ['--import', 'tsx/esm', scriptPath, ...args] : [scriptPath, ...args];
+  // `--no-warnings`: without it, Node 22 (though not the newer version this was developed
+  // against) prints `ExperimentalWarning: SQLite is an experimental feature` to stderr on every
+  // `node:sqlite` import, which would fail the strict `stderr: ''` assertions below on a false
+  // positive — confirmed by CI on this exact PR (round 8): green locally, red in Node 22 CI.
+  const noWarnings = ['--no-warnings'];
+  const nodeArgs = useTsx
+    ? [...noWarnings, '--import', 'tsx/esm', scriptPath, ...args]
+    : [...noWarnings, scriptPath, ...args];
   const child = spawn(process.execPath, nodeArgs, {
     cwd: path.resolve(import.meta.dirname, '..', '..'),
     stdio: [stdin, 'pipe', 'pipe'],
