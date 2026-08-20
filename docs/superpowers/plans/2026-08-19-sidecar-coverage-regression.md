@@ -93,6 +93,15 @@ fresh database (where the column doesn't exist yet, so it's added once) and an e
 `node:sqlite` bundles a modern SQLite (`ADD COLUMN IF NOT EXISTS` has been supported since SQLite
 3.35.0, 2021), so this syntax is safe to rely on without a version check.
 
+> **Superseded during implementation:** SQLite's `ALTER TABLE ... ADD COLUMN` has no `IF NOT
+> EXISTS` clause at all (that's Postgres/MySQL syntax) — running it as written below throws a
+> syntax error, confirmed against the node:sqlite-bundled SQLite 3.35.0+. What actually shipped
+> checks `pragma_table_info('sessions')` for the column first and only then runs a plain `ALTER
+> TABLE ... ADD COLUMN` inside a `BEGIN IMMEDIATE ... COMMIT` transaction (see
+> `migrateTranscriptSyncedHash` in `src/surfaces/sidecar.ts`), which is also what makes the
+> migration atomic and safe against a mid-migration crash or two racing processes — the plan
+> below predates that requirement. Left here for historical context rather than rewritten.
+
 In `src/surfaces/sidecar.ts`, leave the existing `CREATE TABLE IF NOT EXISTS sessions (...)`
 block in `SCHEMA_SQL` completely unchanged, and add the migration statement right after it:
 

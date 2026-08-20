@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -141,6 +142,74 @@ const expectMidflightRowSurvivesReopen = (): void => {
   }
 };
 
+/** Runs `open-sidecar-worker.mjs` as a real child process via the project's `tsx` loader (already
+ * a devDependency) so it can import `sidecar.ts` directly, without a build step. */
+const runOpenSidecarWorker = (
+  workerPath: string,
+  dbPath: string,
+): Promise<{ code: number | null; stderr: string }> =>
+  new Promise((resolve) => {
+    const child = spawn(process.execPath, ['--import', 'tsx/esm', workerPath, dbPath], {
+      cwd: path.resolve(import.meta.dirname, '..', '..'),
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on('close', (code) => {
+      resolve({ code, stderr });
+    });
+  });
+
+/**
+ * `migrateTranscriptSyncedHash`'s busy-retry-then-rollback handling exists specifically for two
+ * real OS processes racing to migrate the same pre-migration `index.db` at once (e.g. two
+ * concurrent `hooks/session-end.mjs` runs) — see the extensive comments above that function. That
+ * claim can only be tested with genuine OS-level concurrency: `node:sqlite`'s `DatabaseSync` API
+ * is synchronous, so two `openSidecar` calls on one JS thread can never actually overlap — the
+ * first always finishes before the second starts, which would only ever exercise the harmless
+ * "column already exists" fast path. Two real child processes, launched together and awaited
+ * together, can genuinely contend for the same file lock the way two `SessionEnd` hooks do in
+ * production.
+ *
+ * Regardless of which process wins the race, both must exit cleanly (never crash with
+ * `SQLITE_BUSY` or a stuck transaction) and the end state must be correct exactly once — the
+ * failure mode this guards is losing that safety in a future refactor of the busy-retry/rollback
+ * logic.
+ */
+const expectConcurrentOpenersBothSucceed = async (): Promise<void> => {
+  const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-sidecar-race-'));
+  const dbPath = path.join(tmp, 'index.db');
+  try {
+    insertPreMigrationRow(dbPath, recordFor('s-race', ADD_FTS), 'race-hash');
+
+    const sidecarPath = path.join(import.meta.dirname, 'sidecar.ts');
+    const workerPath = path.join(tmp, 'open-sidecar-worker.mjs');
+    writeFileSync(
+      workerPath,
+      `import { openSidecar } from ${JSON.stringify(sidecarPath)};\nopenSidecar(process.argv[2]).close();\n`,
+    );
+
+    const [first, second] = await Promise.all([
+      runOpenSidecarWorker(workerPath, dbPath),
+      runOpenSidecarWorker(workerPath, dbPath),
+    ]);
+
+    expect({ code: first.code, stderr: first.stderr }).toEqual({ code: 0, stderr: '' });
+    expect({ code: second.code, stderr: second.stderr }).toEqual({ code: 0, stderr: '' });
+
+    const verify = openSidecar(dbPath);
+    try {
+      expect(verify.getTranscriptSyncedHash('s-race')).toBe('race-hash');
+    } finally {
+      verify.close();
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+};
+
 describe('sidecar', () => {
   let sidecar: Sidecar;
   beforeEach(() => {
@@ -228,5 +297,9 @@ describe('sidecar', () => {
 
   it('does not retroactively mark a not-yet-synced row as synced on a later reopen', () => {
     expectMidflightRowSurvivesReopen();
+  });
+
+  it('lets two concurrent processes migrate the same pre-migration db without either crashing', async () => {
+    await expectConcurrentOpenersBothSucceed();
   });
 });
