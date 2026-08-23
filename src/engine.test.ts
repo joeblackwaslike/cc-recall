@@ -184,8 +184,11 @@ const expectGarbageProjectDirExcludedFromBackfill = async (
 const expectBareFilenameIsSkipped = async (root: string, sidecar: Sidecar): Promise<void> => {
   writeFileSync(path.join(root, 'ghost3.jsonl'), garbageTranscript('ghost3'));
   const cwd = process.cwd();
-  process.chdir(root);
+  // chdir so the relative path 'ghost3.jsonl' resolves via readFileSync — indexSession does not
+  // resolve a relative filePath against baseDir before reading. chdir itself is inside the try so
+  // a throw there still restores cwd in the finally.
   try {
+    process.chdir(root);
     const result = await indexSession('ghost3.jsonl', sidecar, { llm: false });
     expect(result).toMatchObject({ skipped: true, written: false });
   } finally {
@@ -381,7 +384,7 @@ describe('engine — garbage project-dir guards and backfill idempotency', () =>
     await expectBareFilenameIsSkipped(root, sidecar);
   });
 
-  it('does not treat a mid-path "/./ " segment as a degenerate project dir', async () => {
+  it('does not treat a mid-path "/./" segment as a degenerate project dir', async () => {
     await expectMidPathDotSegmentIsNotGarbage(root, sidecar, baseDir);
   });
 

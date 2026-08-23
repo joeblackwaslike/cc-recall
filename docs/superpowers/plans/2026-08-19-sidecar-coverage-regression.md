@@ -33,7 +33,9 @@ existing idempotency contract (task 1) and adding one more skip condition next t
    as real sessions under `project = '-'`. On 2026-08-15 ~44K such rows were manually purged
    directly against production `index.db` (undocumented, outside cc-recall's own tooling) — but
    the code path that produces them is still live: 13 such rows exist right now, and
-   `~/.claude/projects/-/` has already been recreated since the purge.
+   `~/.claude/projects/-/` has already been recreated since the purge. (Plan-authoring-time
+   count; by the time this PR's description was written the live count had grown to 16 — see
+   the PR body for the current figure and the follow-up cleanup step.)
 
 These two bugs are independent — neither depends on the other's fix — but both live in
 `indexSession`, so they're done as one PR to avoid two rounds of touching the same function.

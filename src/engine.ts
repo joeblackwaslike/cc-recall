@@ -34,8 +34,9 @@ import { parseTranscriptText } from './transcript/parse.js';
 
 export const defaultProjectsRoot = (): string => path.join(homedir(), '.claude', 'projects');
 
-/** The encoded-cwd project dir name a transcript lives under. */
 /**
+ * The encoded-cwd project dir name a transcript lives under.
+ *
  * Normalizes first so a `/./` segment collapses before `dirname`/`basename` run — otherwise a
  * legitimate path like `/tmp/proj/./session.jsonl` yields `dirname` `/tmp/proj/.` and `basename`
  * `.`, which the degenerate-project-dir guard below would then treat as garbage and skip forever,

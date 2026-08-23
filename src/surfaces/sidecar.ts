@@ -55,7 +55,9 @@ const SQLITE_BUSY_ERRCODE = 5;
  * `errcode` stays pinned to the base result code (`5`) for every `SQLITE_BUSY` variant rather
  * than splitting into extended codes like `SQLITE_BUSY_RECOVERY` (261) or `SQLITE_BUSY_SNAPSHOT`
  * (517) — verified empirically, not guaranteed by any spec, so a future Node/node:sqlite version
- * could change or drop this property without notice.
+ * could change or drop this property without notice. If `errcode` disappears or its meaning
+ * changes, this returns `false` and every `SQLITE_BUSY` propagates as an immediate hard throw —
+ * the safe degradation path (pre-retry behavior), not a crash or a silent hang.
  */
 const isSqliteBusyError = (error: unknown): boolean =>
   error instanceof Error &&
