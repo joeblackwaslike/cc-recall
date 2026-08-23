@@ -135,9 +135,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
  *
  * `ALTER TABLE ... ADD COLUMN` and the backfill `UPDATE` run inside a single `BEGIN
  * IMMEDIATE ... COMMIT` transaction, specifically so column existence stays a trustworthy
- * completion marker: SQLite's DDL is transactional, so if this process is killed between the two
- * statements, the whole transaction — including the `ALTER TABLE` — rolls back, and the column
- * still doesn't exist on the next `openSidecar` call. Without that atomicity, a crash in that
+ * completion marker: SQLite's DDL is transactional, so on a clean kill of this process between
+ * the two statements, the whole transaction — including the `ALTER TABLE` — rolls back per
+ * SQLite's WAL durability guarantees, and the column still doesn't exist on the next
+ * `openSidecar` call. (This relies on SQLite's own durability model, not a guarantee this code
+ * adds — it doesn't cover corruption below that layer, e.g. a kill mid-fsync or filesystem
+ * damage.) Without that atomicity, a crash in that
  * window would leave the column present but every pre-existing row permanently un-backfilled,
  * since every future call takes the fast "column already exists" return above and the backfill
  * would never run again.

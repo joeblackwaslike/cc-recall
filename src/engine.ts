@@ -208,7 +208,8 @@ const isIndexerRun = (
  * Claude Code encodes a degenerate cwd (e.g. the literal root `/`) into the literal project
  * directory name `-` — never a real project, since every real cwd is an absolute path with at
  * least one more path segment than that. `projectFromPath` can also yield `''` (a root-level
- * file path, e.g. `/ghost.jsonl`) or `'.'` (a file path with no directory component at all,
+ * file path, e.g. `/ghost.jsonl`: `dirname` is `/`, and `basename('/')` is `''`) or `'.'` (a
+ * file path with no directory component at all,
  * e.g. `ghost.jsonl`) — both are exactly as structurally invalid under the same invariant, though
  * only `-` has been observed in production so far; `''` and `'.'` are preventive additions from
  * the same structural analysis, not separately confirmed at scale. ~44K `-` rows were manually
@@ -308,7 +309,11 @@ const transcriptsInDir = (dir: string): string[] => {
 };
 
 /** Enumerate every transcript under the projects root, optionally filtered by dir substring. */
-export const listTranscripts = (projectsRoot: string, scope?: string): string[] => {
+export const listTranscripts = (
+  projectsRoot: string,
+  scope?: string,
+  onWarn?: (message: string) => void,
+): string[] => {
   const files: string[] = [];
   let directories: string[];
   try {
@@ -316,11 +321,18 @@ export const listTranscripts = (projectsRoot: string, scope?: string): string[] 
   } catch {
     return [];
   }
+  let skippedGarbageDirectories = 0;
   for (const dir of directories) {
     if (dir === INDEXER_PROJECT_DIR) continue;
-    if (isGarbageProjectDir(dir)) continue;
+    if (isGarbageProjectDir(dir)) {
+      skippedGarbageDirectories++;
+      continue;
+    }
     if (scope && !dir.includes(scope)) continue;
     files.push(...transcriptsInDir(path.join(projectsRoot, dir)));
+  }
+  if (skippedGarbageDirectories > 0) {
+    onWarn?.(`skipped ${skippedGarbageDirectories} degenerate project dir(s) during enumeration`);
   }
   return files;
 };
@@ -485,7 +497,7 @@ export const backfill = async (
   options: BackfillOptions = {},
 ): Promise<BackfillSummary> => {
   const root = options.projectsRoot ?? defaultProjectsRoot();
-  const all = listTranscripts(root, options.scope);
+  const all = listTranscripts(root, options.scope, options.onWarn);
   const files = options.limit === undefined ? all : all.slice(0, options.limit);
   const summary: BackfillSummary = {
     total: files.length,
