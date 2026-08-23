@@ -205,7 +205,13 @@ const migrateTranscriptSyncedHash = (db: DatabaseSync): void => {
           !(rollbackError instanceof Error) ||
           rollbackError.message !== ROLLBACK_NO_TRANSACTION_MESSAGE
         ) {
-          throw new Error('ROLLBACK failed after a migration error', { cause: rollbackError });
+          // Both errors matter to a debugger: `error` is what actually broke the migration;
+          // rollbackError is why the cleanup couldn't even happen. Neither on its own explains
+          // the failure.
+          throw new AggregateError(
+            [error, rollbackError],
+            'ROLLBACK failed after a migration error',
+          );
         }
       }
       if (error instanceof Error && error.message.includes('duplicate column name')) return;
