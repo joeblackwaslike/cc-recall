@@ -34,8 +34,16 @@ import { parseTranscriptText } from './transcript/parse.js';
 
 export const defaultProjectsRoot = (): string => path.join(homedir(), '.claude', 'projects');
 
-/** The encoded-cwd project dir name a transcript lives under. */
-export const projectFromPath = (filePath: string): string => path.basename(path.dirname(filePath));
+/**
+ * The encoded-cwd project dir name a transcript lives under.
+ *
+ * Normalizes first so a `/./` segment collapses before `dirname`/`basename` run — otherwise a
+ * legitimate path like `/tmp/proj/./session.jsonl` yields `dirname` `/tmp/proj/.` and `basename`
+ * `.`, which the degenerate-project-dir guard below would then treat as garbage and skip forever,
+ * even though the session genuinely lives under the real `proj` directory.
+ */
+export const projectFromPath = (filePath: string): string =>
+  path.basename(path.dirname(path.normalize(filePath)));
 
 /**
  * Claude Code encodes a cwd into a project dir name by replacing `/` and `.` with `-`.
@@ -196,6 +204,36 @@ const isIndexerRun = (
   return isDirMatch || isPromptMatch;
 };
 
+/**
+ * Claude Code encodes a degenerate cwd (e.g. the literal root `/`) into the literal project
+ * directory name `-` — never a real project, since every real cwd is an absolute path with at
+ * least one more path segment than that. `projectFromPath` can also yield `''` (a root-level
+ * file path, e.g. `/ghost.jsonl`: `dirname` is `/`, and `basename('/')` is `''`) or `'.'` (a
+ * file path with no directory component at all,
+ * e.g. `ghost.jsonl`) — both are exactly as structurally invalid under the same invariant, though
+ * only `-` has been observed in production so far; `''` and `'.'` are preventive additions from
+ * the same structural analysis, not separately confirmed at scale. ~44K `-` rows were manually
+ * purged from production on 2026-08-15 (cc-recall-xkf); this stops new ones — of any of these
+ * three shapes — from being indexed at all rather than relying on another manual cleanup.
+ */
+const GARBAGE_PROJECT_DIRS = new Set(['-', '', '.']);
+const isGarbageProjectDir = (project: string): boolean => GARBAGE_PROJECT_DIRS.has(project);
+
+/**
+ * Extracted solely to satisfy max-statements; there is no second caller in `indexSession` —
+ * inline this back if that constraint ever relaxes. Note: `isGarbageProjectDir` itself has a
+ * second call site in `listTranscripts` and must not be removed alongside this helper.
+ */
+const skipGarbageProject = (
+  filePath: string,
+  sessionId: string,
+  project: string,
+  options: IndexOptions,
+): IndexResult => {
+  options.onWarn?.(`skipping session in the degenerate project dir "${project}": ${filePath}`);
+  return { sessionId, title: '(degenerate project dir)', written: false, skipped: true };
+};
+
 export const indexSession = async (
   filePath: string,
   sidecar: Sidecar,
@@ -204,6 +242,9 @@ export const indexSession = async (
   const text = readFileSync(filePath, 'utf8');
   const parsed = parseTranscriptText(text, filePath);
   const project = projectFromPath(filePath);
+
+  if (isGarbageProjectDir(project))
+    return skipGarbageProject(filePath, parsed.sessionId, project, options);
 
   if (isIndexerRun(project, parsed.firstUserPromptRaw, parsed.sessionId)) {
     return { sessionId: parsed.sessionId, title: '(indexer run)', written: false, skipped: true };
@@ -225,16 +266,18 @@ export const indexSession = async (
         skipped: true,
       };
     }
-  } else if (!options.force && sidecar.getSourceHash(parsed.sessionId) === sourceHash) {
+  } else if (
+    !options.force &&
+    sidecar.getSourceHash(parsed.sessionId) === sourceHash &&
+    sidecar.getTranscriptSyncedHash(parsed.sessionId) === sourceHash
+  ) {
     return { sessionId: parsed.sessionId, title: '(unchanged)', written: false, skipped: true };
   }
 
-  const input = {
-    parsed,
-    project,
-    provenance: options.provenance ?? ('backfill' satisfies Provenance),
-  };
-  const record: RecallRecord = await synthesize(input, synthOptionsFrom(options));
+  const record: RecallRecord = await synthesize(
+    { parsed, project, provenance: options.provenance ?? ('backfill' satisfies Provenance) },
+    synthOptionsFrom(options),
+  );
 
   if (options.dryRun) {
     return { sessionId: parsed.sessionId, title: record.title, written: false, skipped: false };
@@ -242,6 +285,9 @@ export const indexSession = async (
 
   sidecar.upsert(record, sourceHash);
   const write = writeToTranscript(filePath, record, sourceHash, options);
+  if (write.written || write.skipReason === 'unchanged') {
+    sidecar.markTranscriptSynced(parsed.sessionId, sourceHash);
+  }
   await writeToClaudeMem(record, options);
 
   return {
@@ -263,7 +309,11 @@ const transcriptsInDir = (dir: string): string[] => {
 };
 
 /** Enumerate every transcript under the projects root, optionally filtered by dir substring. */
-export const listTranscripts = (projectsRoot: string, scope?: string): string[] => {
+export const listTranscripts = (
+  projectsRoot: string,
+  scope?: string,
+  onWarn?: (message: string) => void,
+): string[] => {
   const files: string[] = [];
   let directories: string[];
   try {
@@ -271,10 +321,18 @@ export const listTranscripts = (projectsRoot: string, scope?: string): string[] 
   } catch {
     return [];
   }
+  let skippedGarbageDirectories = 0;
   for (const dir of directories) {
     if (dir === INDEXER_PROJECT_DIR) continue;
+    if (isGarbageProjectDir(dir)) {
+      skippedGarbageDirectories++;
+      continue;
+    }
     if (scope && !dir.includes(scope)) continue;
     files.push(...transcriptsInDir(path.join(projectsRoot, dir)));
+  }
+  if (skippedGarbageDirectories > 0) {
+    onWarn?.(`skipped ${skippedGarbageDirectories} degenerate project dir(s) during enumeration`);
   }
   return files;
 };
@@ -439,7 +497,7 @@ export const backfill = async (
   options: BackfillOptions = {},
 ): Promise<BackfillSummary> => {
   const root = options.projectsRoot ?? defaultProjectsRoot();
-  const all = listTranscripts(root, options.scope);
+  const all = listTranscripts(root, options.scope, options.onWarn);
   const files = options.limit === undefined ? all : all.slice(0, options.limit);
   const summary: BackfillSummary = {
     total: files.length,
