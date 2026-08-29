@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.2](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.4.1...cc-recall-v0.4.2) (2026-08-29)
+
+
+### Bug Fixes
+
+* **engine:** sidecar coverage regression — m32 retry starvation + garbage project dirs ([#80](https://github.com/joeblackwaslike/cc-recall/issues/80)) ([91c33ee](https://github.com/joeblackwaslike/cc-recall/commit/91c33ee87d2378239f62fabf773c5d5d745f0270))
+* **migrate:** journal per-op resilience, atomic manifest, collision-safe backups ([#82](https://github.com/joeblackwaslike/cc-recall/issues/82)) ([c46c616](https://github.com/joeblackwaslike/cc-recall/commit/c46c616e3ba674dabcc2370fa00dc146e7a9d310))
+
 ## [0.4.1](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.4.0...cc-recall-v0.4.1) (2026-08-17)
 
 
