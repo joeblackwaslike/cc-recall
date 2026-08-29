@@ -140,7 +140,8 @@ const recordFailure = (
     try {
       appendJournal(sink.baseDir, entry);
     } catch {
-      // Nowhere further to report it — sink.failures above is the durable record.
+      // The caller still receives this failure in memory via sink.failures; it becomes durable
+      // only if the final manifest write succeeds.
     }
   }
 };

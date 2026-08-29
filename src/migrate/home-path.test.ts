@@ -354,6 +354,47 @@ describe('migrateHomePaths — journal reconstruction', () => {
   });
 });
 
+describe('migrateHomePaths — journal ordering', () => {
+  let root: string;
+  let baseDir: string;
+  beforeEach(() => {
+    ({ root, baseDir } = setupFixture('cc-recall-mig-jorder-'));
+  });
+  afterEach(() => {
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  it('rejects a journal with two begin entries, as if two runs were concatenated', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+    const journal = path.join(baseDir, JOURNAL_NAME);
+    const [first] = readFileSync(journal, 'utf8').split('\n', 1);
+    appendFileSync(journal, `${first}\n`);
+
+    expect(() => revertHomePaths({ baseDir })).toThrow(/corrupt/i);
+  });
+
+  it('rejects an operation entry that appears before the begin entry', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+    const journal = path.join(baseDir, JOURNAL_NAME);
+    const lines = readFileSync(journal, 'utf8').trimEnd().split('\n');
+    lines.unshift('{"op":"dir-move","from":"/x","to":"/y","ts":0}');
+    writeFileSync(journal, `${lines.join('\n')}\n`);
+
+    expect(() => revertHomePaths({ baseDir })).toThrow(/corrupt/i);
+  });
+
+  it('rejects an operation entry that appears after the complete entry', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+    const journal = path.join(baseDir, JOURNAL_NAME);
+    appendFileSync(journal, '{"op":"dir-move","from":"/x","to":"/y","ts":0}\n');
+
+    expect(() => revertHomePaths({ baseDir })).toThrow(/corrupt/i);
+  });
+});
+
 describe('migrateHomePaths — revert-data safety', () => {
   let root: string;
   let baseDir: string;

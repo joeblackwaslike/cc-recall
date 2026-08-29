@@ -137,6 +137,55 @@ const parseJournalLines = (text: string): JournalEntry[] => {
   return entries;
 };
 
+type BeginEntry = Extract<JournalEntry, { op: typeof OP_BEGIN }>;
+
+interface JournalOrderState {
+  begin: BeginEntry | undefined;
+  hasSeenComplete: boolean;
+}
+
+/** Validate one line's position against the running order state, mutating it in place. */
+const checkJournalLineOrder = (
+  line: JournalEntry,
+  index: number,
+  state: JournalOrderState,
+): void => {
+  if (line.op === OP_BEGIN) {
+    if (state.begin) {
+      throw new Error(`migrate journal is corrupted: duplicate begin entry at line ${index + 1}`);
+    }
+    state.begin = line;
+    return;
+  }
+  if (!state.begin) {
+    throw new Error(
+      `migrate journal is corrupted: operation before begin entry at line ${index + 1}`,
+    );
+  }
+  if (state.hasSeenComplete) {
+    throw new Error(
+      `migrate journal is corrupted: operation after complete entry at line ${index + 1}`,
+    );
+  }
+  if (line.op === OP_COMPLETE) state.hasSeenComplete = true;
+};
+
+/**
+ * Reject journal lines that are individually well-shaped but structurally out of place: a
+ * second `begin` (two runs' journals concatenated into one file), an operation before the
+ * first `begin`, or an operation after `complete`. Left unchecked, any of these would let
+ * `manifestFromJournal` fold ops from an unrelated run into this one's reconstructed manifest.
+ * Returns the validated `begin` entry.
+ */
+const validateJournalOrder = (lines: readonly JournalEntry[]): BeginEntry => {
+  const state: JournalOrderState = { begin: undefined, hasSeenComplete: false };
+  for (const [index, line] of lines.entries()) {
+    checkJournalLineOrder(line, index, state);
+  }
+  if (!state.begin) throw new Error('migrate journal is missing its begin entry');
+  return state.begin;
+};
+
 /**
  * Rebuild a manifest from the append-only journal. `begin` supplies `from`/`to`;
  * `dir-move`/`file-merge`/`file-rewrite`/`failure` lines populate the manifest arrays via
@@ -146,8 +195,7 @@ const parseJournalLines = (text: string): JournalEntry[] => {
  */
 export const manifestFromJournal = (text: string): MigrateManifest => {
   const lines = parseJournalLines(text);
-  const begin = lines.find((line) => line.op === OP_BEGIN);
-  if (!begin) throw new Error('migrate journal is missing its begin entry');
+  const begin = validateJournalOrder(lines);
 
   const dirMoves: DirMove[] = [];
   const fileMerges: FileMerge[] = [];
