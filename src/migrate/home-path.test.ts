@@ -190,6 +190,43 @@ describe('migrateHomePaths — mid-loop failures', () => {
   });
 });
 
+describe('migrateHomePaths — planning resilience', () => {
+  let root: string;
+  let baseDir: string;
+  beforeEach(() => {
+    ({ root, baseDir } = setupFixture('cc-recall-mig-plan-'));
+  });
+  afterEach(() => {
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  it('an unreadable projects root is recorded as a failure instead of aborting the run', () => {
+    const missingRoot = path.join(path.dirname(root), 'cc-recall-does-not-exist');
+
+    const manifest = migrateHomePaths({
+      from: FROM,
+      to: TO,
+      projectsRoot: missingRoot,
+      baseDir,
+      dryRun: false,
+    });
+
+    expect(manifest.dirMoves).toHaveLength(0);
+    expect(manifest.failures?.some((f) => f.stage === 'dir-move' && f.target === missingRoot)).toBe(
+      true,
+    );
+
+    // A manifest and a completed journal still get written — a caller sees a clean partial
+    // result, not an unhandled exception.
+    expect(existsSync(path.join(baseDir, MANIFEST_NAME))).toBe(true);
+    const journalLines = readFileSync(path.join(baseDir, JOURNAL_NAME), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { op: string });
+    expect(journalLines.some((line) => line.op === 'complete')).toBe(true);
+  });
+});
+
 describe('migrateHomePaths — journal reconstruction', () => {
   let root: string;
   let baseDir: string;
@@ -245,6 +282,20 @@ describe('migrateHomePaths — journal reconstruction', () => {
     const journal = path.join(baseDir, JOURNAL_NAME);
     const lines = readFileSync(journal, 'utf8').trimEnd().split('\n');
     lines.splice(1, 0, '{"op":"dir-move","from":"/x","to"garbage');
+    writeFileSync(journal, `${lines.join('\n')}\n`);
+
+    expect(() => revertHomePaths({ baseDir })).toThrow(/corrupt/i);
+  });
+
+  it('rejects a blank line in the middle of the journal, rather than silently dropping it', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+    // A blank line is only ever legitimate as the file's own final trailing newline — one
+    // appearing between two real entries means a completed operation's record was corrupted,
+    // and must surface as an error rather than being silently skipped like whitespace.
+    const journal = path.join(baseDir, JOURNAL_NAME);
+    const lines = readFileSync(journal, 'utf8').trimEnd().split('\n');
+    lines.splice(1, 0, '');
     writeFileSync(journal, `${lines.join('\n')}\n`);
 
     expect(() => revertHomePaths({ baseDir })).toThrow(/corrupt/i);

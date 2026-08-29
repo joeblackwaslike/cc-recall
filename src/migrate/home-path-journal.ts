@@ -86,34 +86,53 @@ const applyJournalLine = (line: JournalEntry, accumulator: JournalAccumulator): 
 };
 
 /**
- * A crash mid-`appendFileSync` can leave a truncated, unparsable trailing line — exactly the
- * scenario this journal exists to survive. `appendJournal` always writes `<json>\n`, so a
- * *fully* written entry always ends the file in a newline; the only way the file's last
- * character can be something else is a write cut off mid-flight. Tolerance for an unparsable
- * line therefore requires BOTH that it's the last line AND that the file doesn't end in `\n` —
- * a newline-terminated last line was completely written, so a parse failure on it is real
- * corruption (disk error, a bug), not truncation, same as everywhere else. Shape-validation
- * failures are never tolerated regardless of position: truncation breaks JSON syntax, it
- * doesn't produce valid-but-wrong-shape JSON.
+ * Parse and validate one journal line. `shouldTolerateTruncation` is true only for the file's own
+ * last line when the file doesn't end in `\n` (a crash mid-`appendFileSync`) — the one case
+ * where an unparsable line is a tolerated crash artifact rather than corruption; it returns
+ * `undefined` for that case, and throws for every other kind of bad line (blank, malformed
+ * JSON, or valid-but-wrong-shaped) regardless of position.
+ */
+const parseJournalLine = (
+  raw: string,
+  index: number,
+  shouldTolerateTruncation: boolean,
+): JournalEntry | undefined => {
+  if (raw.trim() === '') {
+    if (shouldTolerateTruncation) return undefined;
+    throw new Error(`migrate journal is corrupted at line ${index + 1}: blank line`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    if (shouldTolerateTruncation) return undefined;
+    throw new Error(`migrate journal is corrupted at line ${index + 1}: ${raw}`, { cause: error });
+  }
+  if (!isValidJournalEntry(parsed)) {
+    throw new Error(`migrate journal is corrupted at line ${index + 1}: ${raw}`);
+  }
+  return parsed;
+};
+
+/**
+ * `appendJournal` always writes `<json>\n`, so a fully-written entry always ends the file in a
+ * newline; the only way the file's last character can be something else is a write cut off
+ * mid-flight. Blank lines are tolerated ONLY as the file's own final trailing newline
+ * (`split('\n')` yields one empty trailing element for every well-formed
+ * `<json>\n<json>\n` file) — a blank line ANYWHERE else, including a genuinely truncated final
+ * line that happens to be empty, is corruption of a completed operation's record.
  */
 const parseJournalLines = (text: string): JournalEntry[] => {
   const wasTruncated = !text.endsWith('\n');
-  const rawLines = text.split('\n').filter((line) => line.trim() !== '');
+  const allLines = text.split('\n');
+  // Drop exactly the one trailing empty element `split` produces after the file's final `\n`
+  // (absent when the file was truncated mid-line, since there's no trailing `\n` to split on).
+  const rawLines = wasTruncated ? allLines : allLines.slice(0, -1);
   const entries: JournalEntry[] = [];
   for (const [index, raw] of rawLines.entries()) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (error) {
-      if (wasTruncated && index === rawLines.length - 1) continue;
-      throw new Error(`migrate journal is corrupted at line ${index + 1}: ${raw}`, {
-        cause: error,
-      });
-    }
-    if (!isValidJournalEntry(parsed)) {
-      throw new Error(`migrate journal is corrupted at line ${index + 1}: ${raw}`);
-    }
-    entries.push(parsed);
+    const shouldTolerateTruncation = wasTruncated && index === rawLines.length - 1;
+    const entry = parseJournalLine(raw, index, shouldTolerateTruncation);
+    if (entry) entries.push(entry);
   }
   return entries;
 };

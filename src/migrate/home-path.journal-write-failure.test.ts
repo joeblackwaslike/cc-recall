@@ -1,10 +1,12 @@
-// If a real destructive op succeeds but the journal append that should record it then throws
-// (e.g. disk full), the per-op catch block calls recordFailure — whose own journal append for
-// the *failure* entry can throw for the same reason. That second throw must not itself escape
-// and abort the run; the whole point of per-op resilience is that no single write, successful
-// or not, can take the rest of the migration down with it. Reaching this needs every journal
-// append after the first (`begin`) to fail deterministically, so `node:fs` is mocked here — in
-// its own file, so the rest of the suite keeps running against the real thing.
+// Two things need a failing appendFileSync to reach deterministically, so `node:fs` is mocked
+// here — in its own file, so the rest of the suite keeps running against the real thing:
+//   1. A destructive op that SUCCEEDS but whose own post-op journal append then fails (e.g.
+//      disk full) must not be recorded as an operation failure — the file really did move; only
+//      the journal bookkeeping for it is missing (a known, tracked residual gap, not something
+//      this run should report as "N op(s) failed").
+//   2. A destructive op that genuinely FAILS, whose failure gets recorded via recordFailure —
+//      recordFailure's own journal append for that failure entry can throw for the same reason,
+//      and that second throw must not itself escape and abort the run.
 import type * as NodeFs from 'node:fs';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -53,6 +55,10 @@ describe('migrateHomePaths — journal write failures', () => {
     baseDir = path.join(tmp, 'base');
     mkdirSync(path.join(root, OLD_FOO), { recursive: true });
     writeFileSync(path.join(root, OLD_FOO, U1), `${userLine(U1, '/Users/joeblack/foo')}\n`);
+    // A directory named `bad.jsonl`, not a file, alongside the real seeded file — a genuine
+    // operation failure (EISDIR) that must go through recordFailure, independent of the journal
+    // mock below.
+    mkdirSync(path.join(root, OLD_FOO, 'bad.jsonl'), { recursive: true });
     fsHook.failAppendsAfterFirst = false;
     fsHook.appendCount = 0;
   });
@@ -60,10 +66,10 @@ describe('migrateHomePaths — journal write failures', () => {
     rmSync(path.dirname(root), { recursive: true, force: true });
   });
 
-  it("a failing journal append inside recordFailure's own failure path does not abort the run", () => {
+  it('a post-success journal append failure is not reported as an operation failure, and recordFailure surviving its own append failure does not abort the run', () => {
     // First appendFileSync call is the `begin` line (pre-flight, allowed to succeed); every
-    // append after that fails — including both the op's own success-append and, in its catch
-    // block, recordFailure's failure-append for the same op.
+    // append after that fails — including the dir-move's own success-append, the rewrite's own
+    // genuine EISDIR failure's recordFailure append, and any other post-op append in the run.
     fsHook.failAppendsAfterFirst = true;
 
     const manifest = migrateHomePaths({
@@ -74,8 +80,14 @@ describe('migrateHomePaths — journal write failures', () => {
       dryRun: false,
     });
 
-    expect(manifest.failures?.length).toBeGreaterThan(0);
-    // The directory move itself still happened on disk — only the journal bookkeeping failed.
+    // The dir-move (renameSync) genuinely succeeded — only its journal append failed. That must
+    // not appear in failures: reporting a succeeded operation as failed misleads a user into
+    // retrying something that already happened.
+    expect(manifest.failures?.some((f) => f.stage === 'dir-move')).toBe(false);
+    // The rewrite's EISDIR is a real operation failure and must still be recorded — and
+    // recordFailure's own (also-mocked-to-fail) journal append for it must not crash the run.
+    expect(manifest.failures?.some((f) => f.stage === 'file-rewrite')).toBe(true);
+    // The directory move itself still happened on disk.
     expect(existsSync(path.join(root, OLD_FOO))).toBe(false);
     const moved = parseTranscriptText(readFileSync(path.join(root, NEW_FOO, U1), 'utf8'), U1);
     expect(moved.cwd).toBe('/Users/joe/foo');

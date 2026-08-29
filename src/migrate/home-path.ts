@@ -93,6 +93,19 @@ const appendJournal = (baseDir: string, entry: JournalEntry): void => {
   appendFileSync(journalPath(baseDir), `${JSON.stringify(entry)}\n`);
 };
 
+/**
+ * Best-effort: called only after the destructive op it records already succeeded. A failure
+ * here is a journal-durability gap (cc-recall-j34), not an operation failure, so it must not
+ * be recorded via recordFailure.
+ */
+const appendJournalBestEffort = (baseDir: string, entry: JournalEntry): void => {
+  try {
+    appendJournal(baseDir, entry);
+  } catch {
+    // swallow — see doc comment above
+  }
+};
+
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
@@ -172,21 +185,6 @@ const archiveExistingRevertData = (baseDir: string): void => {
   archive(REWRITE_BACKUPS);
 };
 
-/** Slug dirs under the old home, paired with their new-home destination. */
-const planDirectories = (projectsRoot: string, from: string, to: string): DirMove[] => {
-  const slugFrom = encodeHome(from);
-  const slugTo = encodeHome(to);
-  const moves: DirMove[] = [];
-  for (const name of readdirSync(projectsRoot)) {
-    // Require a path boundary after the home slug so `-Users-joeblackwaslike-*`
-    // (a repo owner under the NEW home) is never mistaken for the old home.
-    if (name !== slugFrom && !name.startsWith(`${slugFrom}-`)) continue;
-    const newName = `${slugTo}${name.slice(slugFrom.length)}`;
-    moves.push({ from: path.join(projectsRoot, name), to: path.join(projectsRoot, newName) });
-  }
-  return moves;
-};
-
 /**
  * `readdirSync`, recording (not throwing) on failure — a source dir can become unreadable
  * mid-run same as any other op. `undefined` distinguishes "enumeration failed" from a
@@ -202,6 +200,44 @@ const readdirOrRecordFailure = (
   } catch (error) {
     recordFailure(sink, stage, dir, error);
     return undefined;
+  }
+};
+
+/**
+ * Slug dirs under the old home, paired with their new-home destination. `projectsRoot` itself
+ * becoming unreadable is recorded like any other enumeration failure (yielding zero planned
+ * moves) rather than thrown — consistent with every other directory read in this file, and it
+ * lets a `complete` journal entry and a real (if empty) manifest still get written instead of
+ * an unhandled exception.
+ */
+const planDirectories = (
+  projectsRoot: string,
+  from: string,
+  to: string,
+  sink: FailureSink,
+): DirMove[] => {
+  const slugFrom = encodeHome(from);
+  const slugTo = encodeHome(to);
+  const moves: DirMove[] = [];
+  const names = readdirOrRecordFailure(projectsRoot, sink, OP_DIR_MOVE) ?? [];
+  for (const name of names) {
+    // Require a path boundary after the home slug so `-Users-joeblackwaslike-*`
+    // (a repo owner under the NEW home) is never mistaken for the old home.
+    if (name !== slugFrom && !name.startsWith(`${slugFrom}-`)) continue;
+    const newName = `${slugTo}${name.slice(slugFrom.length)}`;
+    moves.push({ from: path.join(projectsRoot, name), to: path.join(projectsRoot, newName) });
+  }
+  return moves;
+};
+
+/** Remove `move.from` once it's confirmed empty post-merge — best-effort, recorded on failure. */
+const removeSourceIfEmpty = (move: DirMove, isDryRun: boolean, sink: FailureSink): void => {
+  const remaining = readdirOrRecordFailure(move.from, sink, OP_DIR_MOVE);
+  if (isDryRun || remaining?.length !== 0) return;
+  try {
+    rmdirSync(move.from);
+  } catch (error) {
+    recordFailure(sink, OP_DIR_MOVE, move.from, error);
   }
 };
 
@@ -224,20 +260,14 @@ const mergeDir = (
     if (isDryRun || isCollision) continue;
     try {
       renameSync(from, to);
-      appendJournal(baseDir, { op: OP_FILE_MERGE, from, to, ts: Date.now() });
     } catch (error) {
       recordFailure(sink, OP_FILE_MERGE, from, error);
+      continue;
     }
+    appendJournalBestEffort(baseDir, { op: OP_FILE_MERGE, from, to, ts: Date.now() });
   }
 
-  const remaining = readdirOrRecordFailure(move.from, sink, OP_DIR_MOVE);
-  if (!isDryRun && remaining?.length === 0) {
-    try {
-      rmdirSync(move.from);
-    } catch (error) {
-      recordFailure(sink, OP_DIR_MOVE, move.from, error);
-    }
-  }
+  removeSourceIfEmpty(move, isDryRun, sink);
   return merges;
 };
 
@@ -256,12 +286,19 @@ const applyDirectories = (
       move.merged = true;
       merges.push(...mergeDir(move, isDryRun, baseDir, failures));
     } else if (!isDryRun) {
+      const sink: FailureSink = { baseDir, isDryRun, failures };
       try {
         renameSync(move.from, move.to);
-        appendJournal(baseDir, { op: OP_DIR_MOVE, from: move.from, to: move.to, ts: Date.now() });
       } catch (error) {
-        recordFailure({ baseDir, isDryRun, failures }, OP_DIR_MOVE, move.from, error);
+        recordFailure(sink, OP_DIR_MOVE, move.from, error);
+        continue;
       }
+      appendJournalBestEffort(baseDir, {
+        op: OP_DIR_MOVE,
+        from: move.from,
+        to: move.to,
+        ts: Date.now(),
+      });
     }
   }
   return merges;
@@ -333,16 +370,18 @@ const applyRewrites = (
   const { baseDir, isDryRun } = sink;
   const rewrites: FileRewrite[] = [];
   for (const file of targets) {
+    let count: number;
     try {
-      const count = rewriteFile(file, rename.from, rename.to, isDryRun, baseDir);
-      if (count > 0) {
-        rewrites.push({ file, count });
-        if (!isDryRun) {
-          appendJournal(baseDir, { op: OP_FILE_REWRITE, file, count, ts: Date.now() });
-        }
-      }
+      count = rewriteFile(file, rename.from, rename.to, isDryRun, baseDir);
     } catch (error) {
       recordFailure(sink, OP_FILE_REWRITE, file, error);
+      continue;
+    }
+    if (count > 0) {
+      rewrites.push({ file, count });
+      if (!isDryRun) {
+        appendJournalBestEffort(baseDir, { op: OP_FILE_REWRITE, file, count, ts: Date.now() });
+      }
     }
   }
   return rewrites;
@@ -358,12 +397,12 @@ export const migrateHomePaths = (options: MigrateOptions = {}): MigrateManifest 
     appendJournal(baseDir, { op: OP_BEGIN, from, to, ts: Date.now() });
   }
 
+  const failures: MigrateFailure[] = [];
+  const sink: FailureSink = { baseDir, isDryRun, failures };
   // Mutated in place by applyDirectories to flag which entries went the merge route (see
   // DirMove.merged) — the same array becomes manifest.dirMoves below, in both dry-run and
   // apply mode, so restoreMoves can later tell them apart.
-  const dirMoves = planDirectories(projectsRoot, from, to);
-  const failures: MigrateFailure[] = [];
-  const sink: FailureSink = { baseDir, isDryRun, failures };
+  const dirMoves = planDirectories(projectsRoot, from, to, sink);
   const fileMerges = applyDirectories(dirMoves, isDryRun, baseDir, failures);
   const targets = rewriteTargets(dirMoves, fileMerges, isDryRun, sink);
   const rewrites = applyRewrites(targets, { from, to }, sink);
