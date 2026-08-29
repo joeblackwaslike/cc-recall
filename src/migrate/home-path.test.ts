@@ -188,6 +188,17 @@ describe('migrateHomePaths — mid-loop failures', () => {
     const moved = parseTranscriptText(readFileSync(path.join(root, NEW_FOO, U1), 'utf8'), U1);
     expect(moved.cwd).toBe(MOVED_FOO_CWD);
   });
+});
+
+describe('migrateHomePaths — journal reconstruction', () => {
+  let root: string;
+  let baseDir: string;
+  beforeEach(() => {
+    ({ root, baseDir } = setupFixture('cc-recall-mig-journal-'));
+  });
+  afterEach(() => {
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
 
   it('reverts from a journal with a truncated trailing line (killed mid-append)', () => {
     migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
@@ -200,6 +211,31 @@ describe('migrateHomePaths — mid-loop failures', () => {
     expect(existsSync(path.join(root, OLD_FOO, U1))).toBe(true);
     const restored = parseTranscriptText(readFileSync(path.join(root, OLD_FOO, U1), 'utf8'), U1);
     expect(restored.cwd).toBe(FOO_CWD);
+  });
+
+  it('preserves recorded failures when a manifest is reconstructed from the journal alone', () => {
+    mkdirSync(path.join(root, OLD_FOO, 'bad.jsonl'), { recursive: true });
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+
+    const reconstructed = revertHomePaths({ baseDir });
+
+    expect(reconstructed.failures).toHaveLength(1);
+    expect(reconstructed.failures?.[0]?.stage).toBe('file-rewrite');
+  });
+
+  it('rejects a journal with a corrupted line before the trailing one, rather than silently dropping it', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+    // Only a truncated *trailing* append is a tolerated crash artifact — a malformed line
+    // anywhere earlier in the journal means real corruption, and must surface as an error
+    // rather than being silently skipped, which would recover only part of the migration.
+    const journal = path.join(baseDir, JOURNAL_NAME);
+    const lines = readFileSync(journal, 'utf8').trimEnd().split('\n');
+    lines.splice(1, 0, '{"op":"dir-move","from":"/x","to"garbage');
+    writeFileSync(journal, `${lines.join('\n')}\n`);
+
+    expect(() => revertHomePaths({ baseDir })).toThrow(/corrupt/i);
   });
 });
 

@@ -30,6 +30,32 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { atomicWrite } from '../surfaces/transcript-writer.js';
 import { parseTranscriptText } from '../transcript/parse.js';
+import { manifestFromJournal } from './home-path-journal.js';
+import {
+  type DirMove,
+  type FailureStage,
+  type FileMerge,
+  type FileRewrite,
+  type JournalEntry,
+  type MigrateFailure,
+  type MigrateManifest,
+  OP_BEGIN,
+  OP_COMPLETE,
+  OP_DIR_MOVE,
+  OP_FAILURE,
+  OP_FILE_MERGE,
+  OP_FILE_REWRITE,
+} from './home-path-types.js';
+
+export type {
+  DirMove,
+  FailureStage,
+  FileMerge,
+  FileRewrite,
+  JournalEntry,
+  MigrateFailure,
+  MigrateManifest,
+} from './home-path-types.js';
 
 const DEFAULT_FROM = '/Users/joeblack';
 const DEFAULT_TO = '/Users/joe';
@@ -45,55 +71,6 @@ export interface MigrateOptions {
   /** Default true — nothing is written unless explicitly disabled. */
   dryRun?: boolean;
 }
-
-export interface DirMove {
-  from: string;
-  to: string;
-}
-export interface FileMerge {
-  from: string;
-  to: string;
-  /** Target already existed — a genuine collision we skipped (should not happen with UUIDs). */
-  collision: boolean;
-}
-export interface FileRewrite {
-  file: string;
-  count: number;
-}
-
-const OP_BEGIN = 'begin';
-const OP_DIR_MOVE = 'dir-move';
-const OP_FILE_MERGE = 'file-merge';
-const OP_FILE_REWRITE = 'file-rewrite';
-const OP_FAILURE = 'failure';
-const OP_COMPLETE = 'complete';
-
-type FailureStage = typeof OP_DIR_MOVE | typeof OP_FILE_MERGE | typeof OP_FILE_REWRITE;
-
-export interface MigrateFailure {
-  stage: FailureStage;
-  target: string;
-  error: string;
-}
-
-export interface MigrateManifest {
-  from: string;
-  to: string;
-  dryRun: boolean;
-  dirMoves: DirMove[];
-  fileMerges: FileMerge[];
-  rewrites: FileRewrite[];
-  /** Additive — absent or empty on a clean run; an old pre-fix manifest has no such field. */
-  failures?: MigrateFailure[];
-}
-
-type JournalEntry =
-  | { op: typeof OP_BEGIN; from: string; to: string; ts: number }
-  | { op: typeof OP_DIR_MOVE; from: string; to: string; ts: number }
-  | { op: typeof OP_FILE_MERGE; from: string; to: string; ts: number }
-  | { op: typeof OP_FILE_REWRITE; file: string; count: number; ts: number }
-  | { op: typeof OP_FAILURE; stage: FailureStage; target: string; error: string; ts: number }
-  | { op: typeof OP_COMPLETE; ts: number; failures: number };
 
 const encodeHome = (home: string): string => home.replaceAll('/', '-');
 
@@ -146,14 +123,9 @@ const recordFailure = (
     // the op's own success-append) must not itself escape and abort the run — that would just
     // relocate the single-throw-kills-everything bug this file exists to fix, from the
     // operation path onto the failure-recording path.
+    const entry: JournalEntry = { op: OP_FAILURE, stage, target, error: message, ts: Date.now() };
     try {
-      appendJournal(sink.baseDir, {
-        op: OP_FAILURE,
-        stage,
-        target,
-        error: message,
-        ts: Date.now(),
-      });
+      appendJournal(sink.baseDir, entry);
     } catch {
       // Nowhere further to report it — sink.failures above is the durable record.
     }
@@ -431,75 +403,6 @@ const restoreMoves = (manifest: MigrateManifest): void => {
   for (const move of manifest.dirMoves) {
     if (existsSync(move.to) && !existsSync(move.from)) renameSync(move.to, move.from);
   }
-};
-
-interface JournalAccumulator {
-  dirMoves: DirMove[];
-  fileMerges: FileMerge[];
-  rewrites: FileRewrite[];
-}
-
-/** Fold one journal line into the in-progress manifest arrays; `failure`/`complete` are ignored. */
-const applyJournalLine = (line: JournalEntry, accumulator: JournalAccumulator): void => {
-  switch (line.op) {
-    case OP_DIR_MOVE: {
-      accumulator.dirMoves.push({ from: line.from, to: line.to });
-      break;
-    }
-    case OP_FILE_MERGE: {
-      // Always false, correctly: mergeDir only renames (and journals) the non-collision
-      // branch — a collision is skipped and never reaches appendJournal — so every
-      // journaled file-merge line represents an actual, real rename.
-      accumulator.fileMerges.push({ from: line.from, to: line.to, collision: false });
-      break;
-    }
-    case OP_FILE_REWRITE: {
-      accumulator.rewrites.push({ file: line.file, count: line.count });
-      break;
-    }
-    default: {
-      break;
-    }
-  }
-};
-
-/**
- * Rebuild a manifest from the append-only journal when the final manifest write never
- * happened (killed mid-run). `begin` supplies `from`/`to`; `dir-move`/`file-merge`/
- * `file-rewrite` lines populate the three arrays via `applyJournalLine`; `failure`/`complete`
- * are ignored — no special-casing of partial-vs-complete is needed, since
- * `restoreRewrites`/`restoreMerges`/`restoreMoves` are already idempotent and
- * `existsSync`-guarded.
- */
-/**
- * A crash mid-`appendFileSync` can leave a truncated, unparsable trailing line — exactly the
- * scenario this journal exists to survive. Drop it rather than let `JSON.parse` throw and take
- * down the entire revert with it.
- */
-const parseJournalLine = (line: string): JournalEntry | undefined => {
-  try {
-    return JSON.parse(line) as JournalEntry;
-  } catch {
-    return undefined;
-  }
-};
-
-const manifestFromJournal = (text: string): MigrateManifest => {
-  const lines = text
-    .split('\n')
-    .filter((line) => line.trim() !== '')
-    .map((line) => parseJournalLine(line))
-    .filter((line): line is JournalEntry => line !== undefined);
-  const begin = lines.find((line) => line.op === OP_BEGIN);
-  if (!begin) throw new Error('migrate journal is missing its begin entry');
-
-  const dirMoves: DirMove[] = [];
-  const fileMerges: FileMerge[] = [];
-  const rewrites: FileRewrite[] = [];
-  for (const line of lines) {
-    applyJournalLine(line, { dirMoves, fileMerges, rewrites });
-  }
-  return { from: begin.from, to: begin.to, dryRun: false, dirMoves, fileMerges, rewrites };
 };
 
 /** Manifest if it was written, else rebuilt from the journal, else undefined (neither exists). */
