@@ -265,26 +265,29 @@ const applyDirectories = (
 
 /**
  * Transcript files to rewrite. On apply they live at the destination; in a dry-run the
- * moves have not happened yet, so we preview against the still-in-place source files.
+ * moves have not happened yet, so we preview against the still-in-place source files. A
+ * directory that exists but can't be enumerated (e.g. a permissions change) is recorded as a
+ * failure and treated as contributing no targets, rather than aborting target discovery for
+ * every other directory.
  */
-const jsonlFilesIn = (dir: string): string[] =>
-  existsSync(dir)
-    ? readdirSync(dir)
-        .filter((entry) => entry.endsWith('.jsonl'))
-        .map((entry) => path.join(dir, entry))
-    : [];
+const jsonlFilesIn = (dir: string, sink: FailureSink): string[] => {
+  if (!existsSync(dir)) return [];
+  const entries = readdirOrRecordFailure(dir, sink, OP_DIR_MOVE) ?? [];
+  return entries.filter((entry) => entry.endsWith('.jsonl')).map((entry) => path.join(dir, entry));
+};
 
 const rewriteTargets = (
   moves: readonly DirMove[],
   merges: readonly FileMerge[],
   isDryRun: boolean,
+  sink: FailureSink,
 ): string[] => {
   const key: 'from' | 'to' = isDryRun ? 'from' : 'to';
   const merged = merges
     .filter((m) => !m.collision)
     .map((m) => m[key])
     .filter((f) => f.endsWith('.jsonl'));
-  const fromMoves = moves.flatMap((move) => jsonlFilesIn(move[key]));
+  const fromMoves = moves.flatMap((move) => jsonlFilesIn(move[key], sink));
   return [...new Set([...merged, ...fromMoves])];
 };
 
@@ -353,9 +356,10 @@ export const migrateHomePaths = (options: MigrateOptions = {}): MigrateManifest 
 
   const dirMoves = planDirectories(projectsRoot, from, to);
   const failures: MigrateFailure[] = [];
+  const sink: FailureSink = { baseDir, isDryRun, failures };
   const fileMerges = applyDirectories(dirMoves, isDryRun, baseDir, failures);
-  const targets = rewriteTargets(dirMoves, fileMerges, isDryRun);
-  const rewrites = applyRewrites(targets, { from, to }, { baseDir, isDryRun, failures });
+  const targets = rewriteTargets(dirMoves, fileMerges, isDryRun, sink);
+  const rewrites = applyRewrites(targets, { from, to }, sink);
 
   const manifest: MigrateManifest = {
     from,
