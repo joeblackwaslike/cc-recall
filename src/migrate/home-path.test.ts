@@ -285,6 +285,21 @@ describe('migrateHomePaths — revert-data safety', () => {
     expect(betaRestored.cwd).toBe('/Users/joeblack/beta');
   });
 
+  it('reverting an empty-source merge does not steal the pre-existing destination directory', () => {
+    const oldEmpty = '-Users-joeblack-empty';
+    const newEmpty = '-Users-joe-empty';
+    const real = 'real-session.jsonl';
+    mkdirSync(path.join(root, oldEmpty), { recursive: true }); // empty old-home dir, no files
+    // Pre-existing, unrelated real content already living at the merge target — must survive.
+    seed(root, newEmpty, real, '/Users/joe/empty');
+
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    revertHomePaths({ baseDir });
+
+    expect(existsSync(path.join(root, newEmpty, real))).toBe(true);
+    expect(existsSync(path.join(root, oldEmpty))).toBe(false);
+  });
+
   it('archives rather than destroys prior manifest/journal/backups on a second apply', () => {
     const first = migrateHomePaths({
       from: FROM,

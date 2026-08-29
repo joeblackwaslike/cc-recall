@@ -250,6 +250,10 @@ const applyDirectories = (
   const merges: FileMerge[] = [];
   for (const move of moves) {
     if (existsSync(move.to)) {
+      // `merged: true` — restoreMoves must never touch this entry (see its own comment for
+      // why): a merge into a pre-existing directory, even one whose source turned out empty
+      // and contributed no fileMerges, is restoreMerges' job alone.
+      move.merged = true;
       merges.push(...mergeDir(move, isDryRun, baseDir, failures));
     } else if (!isDryRun) {
       try {
@@ -354,6 +358,9 @@ export const migrateHomePaths = (options: MigrateOptions = {}): MigrateManifest 
     appendJournal(baseDir, { op: OP_BEGIN, from, to, ts: Date.now() });
   }
 
+  // Mutated in place by applyDirectories to flag which entries went the merge route (see
+  // DirMove.merged) — the same array becomes manifest.dirMoves below, in both dry-run and
+  // apply mode, so restoreMoves can later tell them apart.
   const dirMoves = planDirectories(projectsRoot, from, to);
   const failures: MigrateFailure[] = [];
   const sink: FailureSink = { baseDir, isDryRun, failures };
@@ -405,6 +412,11 @@ const restoreMerges = (manifest: MigrateManifest): void => {
 
 const restoreMoves = (manifest: MigrateManifest): void => {
   for (const move of manifest.dirMoves) {
+    // A merge-path entry has no whole-directory rename to undo here — restoreMerges already
+    // handled its files (or, if the source was empty, there was never anything to restore).
+    // Treating it as a plain rename would rename move.to — the real, pre-existing directory it
+    // merged into — back over move.from, stealing data that was never part of this migration.
+    if (move.merged) continue;
     if (existsSync(move.to) && !existsSync(move.from)) renameSync(move.to, move.from);
   }
 };

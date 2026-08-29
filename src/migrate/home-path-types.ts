@@ -4,6 +4,15 @@
 export interface DirMove {
   from: string;
   to: string;
+  /**
+   * True when `to` already existed and this became a merge (mergeDir), not a plain rename.
+   * `restoreMoves` must skip these — restoreMerges is solely responsible for reverting them
+   * (or, if the source was empty, nothing needs reverting at all). Absent/undefined on a
+   * manifest written before this field existed — there's no way to recover which entries
+   * were merges after the fact for that older data; the fix only protects runs applied after
+   * it ships.
+   */
+  merged?: boolean;
 }
 export interface FileMerge {
   from: string;

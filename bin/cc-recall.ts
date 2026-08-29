@@ -173,9 +173,12 @@ const runMigrate = (options: MigrateCliOptions): void => {
   if (manifest.dryRun) out('re-run with --apply to perform the migration');
   if (manifest.failures?.length) {
     process.exitCode = 1;
-    err(
-      `migrate: ${manifest.failures.length} op(s) failed — see ${path.join(options.baseDir, JOURNAL_NAME)}`,
-    );
+    // Dry runs never write a journal (nothing is written to disk in preview mode), so pointing
+    // at one would send the user to a file that doesn't exist.
+    const where = manifest.dryRun
+      ? 'during dry-run'
+      : `— see ${path.join(options.baseDir, JOURNAL_NAME)}`;
+    err(`migrate: ${manifest.failures.length} op(s) failed ${where}`);
   }
 };
 
