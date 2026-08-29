@@ -10,11 +10,45 @@ import {
   type MigrateFailure,
   type MigrateManifest,
   OP_BEGIN,
+  OP_COMPLETE,
   OP_DIR_MOVE,
   OP_FAILURE,
   OP_FILE_MERGE,
   OP_FILE_REWRITE,
 } from './home-path-types.js';
+
+const isString = (value: unknown): value is string => typeof value === 'string';
+const isNumber = (value: unknown): value is number => typeof value === 'number';
+
+/**
+ * `JSON.parse` only checks syntax — a syntactically valid line like `{"op":"dir-move"}` (missing
+ * `to`) parses cleanly but produces an entry with `undefined` fields that blow up downstream
+ * (e.g. `path.dirname(undefined)` inside a restore call) with no indication the journal was
+ * corrupted. Validate each op's required fields before trusting the cast.
+ */
+const isValidJournalEntry = (value: unknown): value is JournalEntry => {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  switch (v.op) {
+    case OP_BEGIN:
+    case OP_DIR_MOVE:
+    case OP_FILE_MERGE: {
+      return isString(v.from) && isString(v.to) && isNumber(v.ts);
+    }
+    case OP_FILE_REWRITE: {
+      return isString(v.file) && isNumber(v.count) && isNumber(v.ts);
+    }
+    case OP_FAILURE: {
+      return isString(v.stage) && isString(v.target) && isString(v.error) && isNumber(v.ts);
+    }
+    case OP_COMPLETE: {
+      return isNumber(v.ts) && isNumber(v.failures);
+    }
+    default: {
+      return false;
+    }
+  }
+};
 
 interface JournalAccumulator {
   dirMoves: DirMove[];
@@ -53,23 +87,29 @@ const applyJournalLine = (line: JournalEntry, accumulator: JournalAccumulator): 
 
 /**
  * A crash mid-`appendFileSync` can leave a truncated, unparsable trailing line — exactly the
- * scenario this journal exists to survive. Only the trailing line gets this tolerance: a
- * malformed line anywhere earlier means real corruption (disk error, a bug), not a graceful
- * mid-append crash, and must surface as an error rather than silently recovering a subset of
- * the migration with no indication anything was skipped.
+ * scenario this journal exists to survive. Only an unparsable *syntax* on the trailing line
+ * gets this tolerance: truncation breaks JSON syntax, it doesn't produce valid-but-wrong-shape
+ * JSON, so a line that parses but fails shape validation is real corruption (disk error, a bug)
+ * regardless of position, and must surface as an error rather than silently recovering a subset
+ * of the migration with no indication anything was skipped.
  */
 const parseJournalLines = (text: string): JournalEntry[] => {
   const rawLines = text.split('\n').filter((line) => line.trim() !== '');
   const entries: JournalEntry[] = [];
   for (const [index, raw] of rawLines.entries()) {
+    let parsed: unknown;
     try {
-      entries.push(JSON.parse(raw) as JournalEntry);
+      parsed = JSON.parse(raw);
     } catch (error) {
       if (index === rawLines.length - 1) continue;
       throw new Error(`migrate journal is corrupted at line ${index + 1}: ${raw}`, {
         cause: error,
       });
     }
+    if (!isValidJournalEntry(parsed)) {
+      throw new Error(`migrate journal is corrupted at line ${index + 1}: ${raw}`);
+    }
+    entries.push(parsed);
   }
   return entries;
 };

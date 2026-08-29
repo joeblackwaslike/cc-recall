@@ -237,6 +237,20 @@ describe('migrateHomePaths — journal reconstruction', () => {
 
     expect(() => revertHomePaths({ baseDir })).toThrow(/corrupt/i);
   });
+
+  it('rejects a syntactically-valid but wrong-shaped journal line, rather than reconstructing undefined fields', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+    // Valid JSON, missing the required `to` field — JSON.parse alone can't catch this; a
+    // truncated write breaks JSON syntax, it doesn't produce valid-but-wrong-shape JSON, so this
+    // is real corruption, not a tolerated truncation artifact, even though it isn't the last line.
+    const journal = path.join(baseDir, JOURNAL_NAME);
+    const lines = readFileSync(journal, 'utf8').trimEnd().split('\n');
+    lines.splice(1, 0, '{"op":"dir-move","from":"/x"}');
+    writeFileSync(journal, `${lines.join('\n')}\n`);
+
+    expect(() => revertHomePaths({ baseDir })).toThrow(/corrupt/i);
+  });
 });
 
 describe('migrateHomePaths — revert-data safety', () => {
