@@ -165,10 +165,19 @@ const legacyBackupPathFor = (baseDir: string, file: string): string =>
  */
 const archiveExistingRevertData = (baseDir: string): void => {
   if (!existsSync(baseDir)) return;
-  const suffix = new Date().toISOString().replaceAll(/[.:]/g, '-');
+  // Millisecond timestamp plus a collision-avoidance loop: two apply runs in the same second
+  // (a fast test loop, a scripted retry) must never resolve to the same archive path and
+  // silently overwrite each other's revert data.
   const archive = (name: string): void => {
     const src = path.join(baseDir, name);
-    if (existsSync(src)) renameSync(src, `${src}.${suffix}.bak`);
+    if (!existsSync(src)) return;
+    let suffix = Date.now();
+    let dest = `${src}.${suffix}.bak`;
+    while (existsSync(dest)) {
+      suffix += 1;
+      dest = `${src}.${suffix}.bak`;
+    }
+    renameSync(src, dest);
   };
   archive(MANIFEST_NAME);
   archive(JOURNAL_NAME);
@@ -210,7 +219,13 @@ const mergeDir = (
       recordFailure({ baseDir, isDryRun, failures }, OP_FILE_MERGE, from, error);
     }
   }
-  if (!isDryRun && readdirSync(move.from).length === 0) rmdirSync(move.from);
+  if (!isDryRun && readdirSync(move.from).length === 0) {
+    try {
+      rmdirSync(move.from);
+    } catch (error) {
+      recordFailure({ baseDir, isDryRun, failures }, OP_DIR_MOVE, move.from, error);
+    }
+  }
   return merges;
 };
 
@@ -384,6 +399,9 @@ const applyJournalLine = (line: JournalEntry, accumulator: JournalAccumulator): 
       break;
     }
     case OP_FILE_MERGE: {
+      // Always false, correctly: mergeDir only renames (and journals) the non-collision
+      // branch — a collision is skipped and never reaches appendJournal — so every
+      // journaled file-merge line represents an actual, real rename.
       accumulator.fileMerges.push({ from: line.from, to: line.to, collision: false });
       break;
     }
@@ -405,11 +423,25 @@ const applyJournalLine = (line: JournalEntry, accumulator: JournalAccumulator): 
  * `restoreRewrites`/`restoreMerges`/`restoreMoves` are already idempotent and
  * `existsSync`-guarded.
  */
+/**
+ * A crash mid-`appendFileSync` can leave a truncated, unparsable trailing line — exactly the
+ * scenario this journal exists to survive. Drop it rather than let `JSON.parse` throw and take
+ * down the entire revert with it.
+ */
+const parseJournalLine = (line: string): JournalEntry | undefined => {
+  try {
+    return JSON.parse(line) as JournalEntry;
+  } catch {
+    return undefined;
+  }
+};
+
 const manifestFromJournal = (text: string): MigrateManifest => {
   const lines = text
     .split('\n')
     .filter((line) => line.trim() !== '')
-    .map((line) => JSON.parse(line) as JournalEntry);
+    .map((line) => parseJournalLine(line))
+    .filter((line): line is JournalEntry => line !== undefined);
   const begin = lines.find((line) => line.op === OP_BEGIN);
   if (!begin) throw new Error('migrate journal is missing its begin entry');
 

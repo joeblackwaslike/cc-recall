@@ -1,4 +1,5 @@
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -148,6 +149,19 @@ describe('migrateHomePaths — mid-loop failures', () => {
   it('reverts from a journal when the manifest is missing (killed before the final write)', () => {
     migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
     unlinkSync(path.join(baseDir, MANIFEST_NAME));
+
+    revertHomePaths({ baseDir });
+
+    expect(existsSync(path.join(root, OLD_FOO, U1))).toBe(true);
+    const restored = parseTranscriptText(readFileSync(path.join(root, OLD_FOO, U1), 'utf8'), U1);
+    expect(restored.cwd).toBe(FOO_CWD);
+  });
+
+  it('reverts from a journal with a truncated trailing line (killed mid-append)', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+    // Simulate a process kill partway through appendFileSync writing the final journal line.
+    appendFileSync(path.join(baseDir, JOURNAL_NAME), '{"op":"file-rewr');
 
     revertHomePaths({ baseDir });
 
