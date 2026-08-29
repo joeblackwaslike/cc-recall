@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -383,6 +384,25 @@ describe('migrateHomePaths — revert-data safety', () => {
     );
     expect(alphaRestored.cwd).toBe('/Users/joeblack/alpha');
     expect(betaRestored.cwd).toBe('/Users/joeblack/beta');
+  });
+
+  it('falls back to the pre-fix flat backup layout when no namespaced backup exists', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+
+    // Simulate a backup written by a pre-namespacing run: flat `migrate-backups/<basename>`,
+    // no per-directory namespace subfolder.
+    const namespacedDir = path.join(
+      baseDir,
+      'migrate-backups',
+      path.join(root, NEW_FOO).replaceAll('/', '-'),
+    );
+    renameSync(path.join(namespacedDir, U1), path.join(baseDir, 'migrate-backups', U1));
+    rmSync(namespacedDir, { recursive: true, force: true });
+
+    revertHomePaths({ baseDir });
+
+    const restored = parseTranscriptText(readFileSync(path.join(root, OLD_FOO, U1), 'utf8'), U1);
+    expect(restored.cwd).toBe(FOO_CWD);
   });
 
   it('reverting an empty-source merge does not steal the pre-existing destination directory', () => {
