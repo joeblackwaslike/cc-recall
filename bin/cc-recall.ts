@@ -171,6 +171,17 @@ const runMigrate = (options: MigrateCliOptions): void => {
     `${manifest.dryRun ? 'DRY-RUN' : 'APPLIED'}: ${manifest.dirMoves.length} dir moves, ${manifest.fileMerges.length} merges, ${manifest.rewrites.length} rewrites`,
   );
   if (manifest.dryRun) out('re-run with --apply to perform the migration');
+  if (manifest.failures?.length) {
+    process.exitCode = 1;
+    // Print the actual failures rather than pointing at a file: a dry run never writes a
+    // journal, and even on an apply run the journal's own failure-recording is best-effort
+    // (see recordFailure) — manifest.failures, already in hand here, is the one thing
+    // guaranteed to have the detail.
+    err(`migrate: ${manifest.failures.length} op(s) failed:`);
+    for (const failure of manifest.failures) {
+      err(`  ${failure.stage} ${failure.target}: ${failure.error}`);
+    }
+  }
 };
 
 const runSearch = (query: string, options: SearchCliOptions): void => {

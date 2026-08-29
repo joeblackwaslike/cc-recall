@@ -341,7 +341,7 @@ const fsyncParentDirectory = (filePath: string, onWarn?: (message: string) => vo
  * `renameSync` is the commit point. Everything before it may fail the operation; nothing after
  * it may.
  */
-const atomicWrite = (
+export const atomicWrite = (
   filePath: string,
   content: string,
   onWarn?: (message: string) => void,
