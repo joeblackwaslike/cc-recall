@@ -106,6 +106,43 @@ describe('migrateHomePaths', () => {
   });
 });
 
+describe('migrateHomePaths — revert after partial failure', () => {
+  let root: string;
+  let baseDir: string;
+  beforeEach(() => {
+    ({ root, baseDir } = setupFixture('cc-recall-mig-revfail-'));
+  });
+  afterEach(() => {
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  it('reverts the successfully-migrated content even though the manifest also recorded a failure', () => {
+    // Same EISDIR fixture as the mid-loop-failure test: OLD_FOO's whole-dir rename and its real
+    // U1 rewrite both succeed; only the bogus bad.jsonl "file" fails to rewrite.
+    mkdirSync(path.join(root, OLD_FOO, 'bad.jsonl'), { recursive: true });
+
+    const manifest = migrateHomePaths({
+      from: FROM,
+      to: TO,
+      projectsRoot: root,
+      baseDir,
+      dryRun: false,
+    });
+    expect(manifest.failures).toHaveLength(1);
+
+    revertHomePaths({ baseDir });
+
+    // OLD_FOO's dir-move and U1's rewrite both revert correctly, unaffected by the unrelated
+    // recorded failure on bad.jsonl.
+    expect(existsSync(path.join(root, OLD_FOO, U1))).toBe(true);
+    const restored = parseTranscriptText(readFileSync(path.join(root, OLD_FOO, U1), 'utf8'), U1);
+    expect(restored.cwd).toBe(FOO_CWD);
+    // The unrelated merge fixture (OLD_BAR -> pre-existing NEW_BAR) reverts too.
+    expect(existsSync(path.join(root, OLD_BAR, U2))).toBe(true);
+    expect(existsSync(path.join(root, NEW_BAR, U2))).toBe(false);
+  });
+});
+
 describe('migrateHomePaths — mid-loop failures', () => {
   let root: string;
   let baseDir: string;
