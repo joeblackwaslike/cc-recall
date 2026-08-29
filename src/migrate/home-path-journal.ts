@@ -87,13 +87,17 @@ const applyJournalLine = (line: JournalEntry, accumulator: JournalAccumulator): 
 
 /**
  * A crash mid-`appendFileSync` can leave a truncated, unparsable trailing line — exactly the
- * scenario this journal exists to survive. Only an unparsable *syntax* on the trailing line
- * gets this tolerance: truncation breaks JSON syntax, it doesn't produce valid-but-wrong-shape
- * JSON, so a line that parses but fails shape validation is real corruption (disk error, a bug)
- * regardless of position, and must surface as an error rather than silently recovering a subset
- * of the migration with no indication anything was skipped.
+ * scenario this journal exists to survive. `appendJournal` always writes `<json>\n`, so a
+ * *fully* written entry always ends the file in a newline; the only way the file's last
+ * character can be something else is a write cut off mid-flight. Tolerance for an unparsable
+ * line therefore requires BOTH that it's the last line AND that the file doesn't end in `\n` —
+ * a newline-terminated last line was completely written, so a parse failure on it is real
+ * corruption (disk error, a bug), not truncation, same as everywhere else. Shape-validation
+ * failures are never tolerated regardless of position: truncation breaks JSON syntax, it
+ * doesn't produce valid-but-wrong-shape JSON.
  */
 const parseJournalLines = (text: string): JournalEntry[] => {
+  const wasTruncated = !text.endsWith('\n');
   const rawLines = text.split('\n').filter((line) => line.trim() !== '');
   const entries: JournalEntry[] = [];
   for (const [index, raw] of rawLines.entries()) {
@@ -101,7 +105,7 @@ const parseJournalLines = (text: string): JournalEntry[] => {
     try {
       parsed = JSON.parse(raw);
     } catch (error) {
-      if (index === rawLines.length - 1) continue;
+      if (wasTruncated && index === rawLines.length - 1) continue;
       throw new Error(`migrate journal is corrupted at line ${index + 1}: ${raw}`, {
         cause: error,
       });

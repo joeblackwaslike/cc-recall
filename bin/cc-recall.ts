@@ -18,7 +18,7 @@ import {
   indexSession,
 } from '../src/engine.js';
 import { logSearchQuery, readAdoptionMetrics } from '../src/metrics/adoption.js';
-import { JOURNAL_NAME, migrateHomePaths, revertHomePaths } from '../src/migrate/home-path.js';
+import { migrateHomePaths, revertHomePaths } from '../src/migrate/home-path.js';
 import { verifyClaudeMemG0 } from '../src/surfaces/claude-mem.js';
 import { verifyDeployedPlugin } from '../src/surfaces/deploy-verify.js';
 import { defaultFrontPagePath, writeFrontPage } from '../src/surfaces/native-memory.js';
@@ -173,12 +173,14 @@ const runMigrate = (options: MigrateCliOptions): void => {
   if (manifest.dryRun) out('re-run with --apply to perform the migration');
   if (manifest.failures?.length) {
     process.exitCode = 1;
-    // Dry runs never write a journal (nothing is written to disk in preview mode), so pointing
-    // at one would send the user to a file that doesn't exist.
-    const where = manifest.dryRun
-      ? 'during dry-run'
-      : `— see ${path.join(options.baseDir, JOURNAL_NAME)}`;
-    err(`migrate: ${manifest.failures.length} op(s) failed ${where}`);
+    // Print the actual failures rather than pointing at a file: a dry run never writes a
+    // journal, and even on an apply run the journal's own failure-recording is best-effort
+    // (see recordFailure) — manifest.failures, already in hand here, is the one thing
+    // guaranteed to have the detail.
+    err(`migrate: ${manifest.failures.length} op(s) failed:`);
+    for (const failure of manifest.failures) {
+      err(`  ${failure.stage} ${failure.target}: ${failure.error}`);
+    }
   }
 };
 

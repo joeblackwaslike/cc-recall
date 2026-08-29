@@ -213,6 +213,18 @@ describe('migrateHomePaths — journal reconstruction', () => {
     expect(restored.cwd).toBe(FOO_CWD);
   });
 
+  it('rejects a newline-terminated (fully-written) corrupt trailing line, unlike a truncated one', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+    // Unlike the truncated-append case above, this line is complete and newline-terminated —
+    // appendJournal always writes `<json>\n`, so a fully-written entry never lacks its trailing
+    // newline. A corrupt *complete* line means real corruption, not an interrupted write, even
+    // though it's also the last line.
+    appendFileSync(path.join(baseDir, JOURNAL_NAME), 'not valid json at all\n');
+
+    expect(() => revertHomePaths({ baseDir })).toThrow(/corrupt/i);
+  });
+
   it('preserves recorded failures when a manifest is reconstructed from the journal alone', () => {
     mkdirSync(path.join(root, OLD_FOO, 'bad.jsonl'), { recursive: true });
     migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
