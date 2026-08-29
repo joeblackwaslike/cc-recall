@@ -138,9 +138,25 @@ const recordFailure = (
   error: unknown,
 ): void => {
   const message = errorMessage(error);
+  // The in-memory record comes first and unconditionally: it's what the caller actually reads
+  // (manifest.failures), so it must land even if the journal itself is unwritable right now.
   sink.failures.push({ stage, target, error: message });
   if (!sink.isDryRun) {
-    appendJournal(sink.baseDir, { op: OP_FAILURE, stage, target, error: message, ts: Date.now() });
+    // Best-effort only. A failing journal append here (e.g. the same ENOSPC that just failed
+    // the op's own success-append) must not itself escape and abort the run — that would just
+    // relocate the single-throw-kills-everything bug this file exists to fix, from the
+    // operation path onto the failure-recording path.
+    try {
+      appendJournal(sink.baseDir, {
+        op: OP_FAILURE,
+        stage,
+        target,
+        error: message,
+        ts: Date.now(),
+      });
+    } catch {
+      // Nowhere further to report it — sink.failures above is the durable record.
+    }
   }
 };
 
@@ -199,6 +215,24 @@ const planDirectories = (projectsRoot: string, from: string, to: string): DirMov
   return moves;
 };
 
+/**
+ * `readdirSync`, recording (not throwing) on failure — a source dir can become unreadable
+ * mid-run same as any other op. `undefined` distinguishes "enumeration failed" from a
+ * legitimately empty directory.
+ */
+const readdirOrRecordFailure = (
+  dir: string,
+  sink: FailureSink,
+  stage: FailureStage,
+): string[] | undefined => {
+  try {
+    return readdirSync(dir);
+  } catch (error) {
+    recordFailure(sink, stage, dir, error);
+    return undefined;
+  }
+};
+
 const mergeDir = (
   move: DirMove,
   isDryRun: boolean,
@@ -206,7 +240,11 @@ const mergeDir = (
   failures: MigrateFailure[],
 ): FileMerge[] => {
   const merges: FileMerge[] = [];
-  for (const file of readdirSync(move.from)) {
+  const sink: FailureSink = { baseDir, isDryRun, failures };
+  const entries = readdirOrRecordFailure(move.from, sink, OP_DIR_MOVE);
+  if (entries === undefined) return merges;
+
+  for (const file of entries) {
     const from = path.join(move.from, file);
     const to = path.join(move.to, file);
     const isCollision = existsSync(to);
@@ -216,14 +254,16 @@ const mergeDir = (
       renameSync(from, to);
       appendJournal(baseDir, { op: OP_FILE_MERGE, from, to, ts: Date.now() });
     } catch (error) {
-      recordFailure({ baseDir, isDryRun, failures }, OP_FILE_MERGE, from, error);
+      recordFailure(sink, OP_FILE_MERGE, from, error);
     }
   }
-  if (!isDryRun && readdirSync(move.from).length === 0) {
+
+  const remaining = readdirOrRecordFailure(move.from, sink, OP_DIR_MOVE);
+  if (!isDryRun && remaining?.length === 0) {
     try {
       rmdirSync(move.from);
     } catch (error) {
-      recordFailure({ baseDir, isDryRun, failures }, OP_DIR_MOVE, move.from, error);
+      recordFailure(sink, OP_DIR_MOVE, move.from, error);
     }
   }
   return merges;
@@ -355,7 +395,15 @@ export const migrateHomePaths = (options: MigrateOptions = {}): MigrateManifest 
     failures,
   };
   if (!isDryRun) {
-    appendJournal(baseDir, { op: OP_COMPLETE, ts: Date.now(), failures: failures.length });
+    // Best-effort, same as recordFailure's own append: a failing `complete` journal line must
+    // not stop the final manifest write below — the manifest, not the trailing journal marker,
+    // is what a normal (non-crash-recovery) revert reads.
+    try {
+      appendJournal(baseDir, { op: OP_COMPLETE, ts: Date.now(), failures: failures.length });
+    } catch {
+      // Nowhere further to report it — the manifest write immediately below is the durable
+      // record that matters here.
+    }
     atomicWrite(path.join(baseDir, MANIFEST_NAME), JSON.stringify(manifest, null, 2));
   }
   return manifest;

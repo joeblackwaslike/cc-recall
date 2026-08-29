@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,6 +28,7 @@ const U1 = 'u1.jsonl';
 const U2 = 'u2.jsonl';
 const U3 = 'u3.jsonl';
 const FOO_CWD = '/Users/joeblack/foo';
+const MOVED_FOO_CWD = '/Users/joe/foo';
 const BAR_CWD = '/Users/joeblack/bar';
 const WASLIKE_CWD = '/Users/joe/x';
 
@@ -88,7 +90,7 @@ describe('migrateHomePaths', () => {
 
     expect(existsSync(path.join(root, OLD_FOO))).toBe(false);
     const moved = parseTranscriptText(readFileSync(path.join(root, NEW_FOO, U1), 'utf8'), U1);
-    expect(moved.cwd).toBe('/Users/joe/foo');
+    expect(moved.cwd).toBe(MOVED_FOO_CWD);
 
     expect(existsSync(path.join(root, NEW_BAR, U2))).toBe(true); // merged into pre-existing dir
     expect(existsSync(path.join(root, OLD_BAR))).toBe(false);
@@ -134,7 +136,7 @@ describe('migrateHomePaths — mid-loop failures', () => {
 
     // The other seeded file in the same directory was still correctly rewritten.
     const moved = parseTranscriptText(readFileSync(path.join(root, NEW_FOO, U1), 'utf8'), U1);
-    expect(moved.cwd).toBe('/Users/joe/foo');
+    expect(moved.cwd).toBe(MOVED_FOO_CWD);
 
     const journal = path.join(baseDir, JOURNAL_NAME);
     expect(existsSync(journal)).toBe(true);
@@ -155,6 +157,36 @@ describe('migrateHomePaths — mid-loop failures', () => {
     expect(existsSync(path.join(root, OLD_FOO, U1))).toBe(true);
     const restored = parseTranscriptText(readFileSync(path.join(root, OLD_FOO, U1), 'utf8'), U1);
     expect(restored.cwd).toBe(FOO_CWD);
+  });
+
+  it('a directory-enumeration failure does not abort the run', () => {
+    // A dangling symlink at an old-home slug: readdirSync throws ENOENT reading it,
+    // deterministically and portably (no chmod/root fragility). Pre-create the merge target so
+    // applyDirectories takes the mergeDir (collision) branch, whose readdirSync(move.from) is
+    // what actually dereferences the symlink and fails — a plain rename of a dangling symlink
+    // (the non-merge branch) succeeds without ever reading through it.
+    const orphanTarget = mkdtempSync(path.join(tmpdir(), 'cc-recall-orphan-'));
+    const oldBroken = '-Users-joeblack-broken';
+    const newBroken = '-Users-joe-broken';
+    mkdirSync(path.join(root, newBroken), { recursive: true });
+    symlinkSync(orphanTarget, path.join(root, oldBroken), 'dir');
+    rmSync(orphanTarget, { recursive: true, force: true });
+
+    const manifest = migrateHomePaths({
+      from: FROM,
+      to: TO,
+      projectsRoot: root,
+      baseDir,
+      dryRun: false,
+    });
+
+    expect(
+      manifest.failures?.some((f) => f.stage === 'dir-move' && f.target.endsWith(oldBroken)),
+    ).toBe(true);
+    // The other seeded directories still migrated normally.
+    expect(existsSync(path.join(root, OLD_FOO))).toBe(false);
+    const moved = parseTranscriptText(readFileSync(path.join(root, NEW_FOO, U1), 'utf8'), U1);
+    expect(moved.cwd).toBe(MOVED_FOO_CWD);
   });
 
   it('reverts from a journal with a truncated trailing line (killed mid-append)', () => {
