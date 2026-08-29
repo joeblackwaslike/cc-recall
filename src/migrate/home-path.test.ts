@@ -1,9 +1,18 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parseTranscriptText } from '../transcript/parse.js';
-import { migrateHomePaths, revertHomePaths } from './home-path.js';
+import { JOURNAL_NAME, MANIFEST_NAME, migrateHomePaths, revertHomePaths } from './home-path.js';
 
 const FROM = '/Users/joeblack';
 const TO = '/Users/joe';
@@ -16,6 +25,9 @@ const WASLIKE = '-Users-joeblackwaslike-proj';
 const U1 = 'u1.jsonl';
 const U2 = 'u2.jsonl';
 const U3 = 'u3.jsonl';
+const FOO_CWD = '/Users/joeblack/foo';
+const BAR_CWD = '/Users/joeblack/bar';
+const WASLIKE_CWD = '/Users/joe/x';
 
 const userLine = (sessionId: string, cwd: string): string =>
   JSON.stringify({
@@ -31,17 +43,24 @@ const seed = (root: string, dir: string, file: string, cwd: string): void => {
   writeFileSync(path.join(root, dir, file), `${userLine(file, cwd)}\n`);
 };
 
+/** Shared fixture: an old-home dir to rename, one to merge into a pre-existing new-home dir
+ * (collision), and a repo-owner dir under the new home that must never be touched. */
+const setupFixture = (tmpPrefix: string): { root: string; baseDir: string } => {
+  const tmp = mkdtempSync(path.join(tmpdir(), tmpPrefix));
+  const root = path.join(tmp, 'projects');
+  const baseDir = path.join(tmp, 'base');
+  seed(root, OLD_FOO, U1, FOO_CWD);
+  mkdirSync(path.join(root, NEW_BAR), { recursive: true }); // pre-existing collision target
+  seed(root, OLD_BAR, U2, BAR_CWD);
+  seed(root, WASLIKE, U3, WASLIKE_CWD); // repo owner under NEW home — must NOT be touched
+  return { root, baseDir };
+};
+
 describe('migrateHomePaths', () => {
   let root: string;
   let baseDir: string;
   beforeEach(() => {
-    const tmp = mkdtempSync(path.join(tmpdir(), 'cc-recall-mig-'));
-    root = path.join(tmp, 'projects');
-    baseDir = path.join(tmp, 'base');
-    seed(root, OLD_FOO, U1, '/Users/joeblack/foo');
-    mkdirSync(path.join(root, NEW_BAR), { recursive: true }); // pre-existing collision target
-    seed(root, OLD_BAR, U2, '/Users/joeblack/bar');
-    seed(root, WASLIKE, U3, '/Users/joe/x'); // repo owner under NEW home — must NOT be touched
+    ({ root, baseDir } = setupFixture('cc-recall-mig-'));
   });
   afterEach(() => {
     rmSync(path.dirname(root), { recursive: true, force: true });
@@ -80,6 +99,120 @@ describe('migrateHomePaths', () => {
     revertHomePaths({ baseDir });
     expect(existsSync(path.join(root, OLD_FOO, U1))).toBe(true);
     const restored = parseTranscriptText(readFileSync(path.join(root, OLD_FOO, U1), 'utf8'), U1);
-    expect(restored.cwd).toBe('/Users/joeblack/foo');
+    expect(restored.cwd).toBe(FOO_CWD);
+  });
+});
+
+describe('migrateHomePaths — mid-loop failures', () => {
+  let root: string;
+  let baseDir: string;
+  beforeEach(() => {
+    ({ root, baseDir } = setupFixture('cc-recall-mig-res-'));
+  });
+  afterEach(() => {
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  it('a mid-loop rewrite failure does not abort the run', () => {
+    // A directory named `bad.jsonl`, not a file — `readFileSync` inside `rewriteFile` throws
+    // EISDIR deterministically (portable, no chmod/root-permission fragility). It rides along
+    // inside OLD_FOO's whole-dir rename (no merge here), so it surfaces as a rewrite target via
+    // `jsonlFilesIn`'s name-suffix filter.
+    mkdirSync(path.join(root, OLD_FOO, 'bad.jsonl'), { recursive: true });
+
+    const manifest = migrateHomePaths({
+      from: FROM,
+      to: TO,
+      projectsRoot: root,
+      baseDir,
+      dryRun: false,
+    });
+
+    expect(manifest.failures).toHaveLength(1);
+    expect(manifest.failures?.[0]?.stage).toBe('file-rewrite');
+
+    // The other seeded file in the same directory was still correctly rewritten.
+    const moved = parseTranscriptText(readFileSync(path.join(root, NEW_FOO, U1), 'utf8'), U1);
+    expect(moved.cwd).toBe('/Users/joe/foo');
+
+    const journal = path.join(baseDir, JOURNAL_NAME);
+    expect(existsSync(journal)).toBe(true);
+    const journalLines = readFileSync(journal, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { op: string });
+    expect(journalLines.some((line) => line.op === 'complete')).toBe(true);
+    expect(journalLines.some((line) => line.op === 'failure')).toBe(true);
+  });
+
+  it('reverts from a journal when the manifest is missing (killed before the final write)', () => {
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    unlinkSync(path.join(baseDir, MANIFEST_NAME));
+
+    revertHomePaths({ baseDir });
+
+    expect(existsSync(path.join(root, OLD_FOO, U1))).toBe(true);
+    const restored = parseTranscriptText(readFileSync(path.join(root, OLD_FOO, U1), 'utf8'), U1);
+    expect(restored.cwd).toBe(FOO_CWD);
+  });
+});
+
+describe('migrateHomePaths — revert-data safety', () => {
+  let root: string;
+  let baseDir: string;
+  beforeEach(() => {
+    ({ root, baseDir } = setupFixture('cc-recall-mig-safety-'));
+  });
+  afterEach(() => {
+    rmSync(path.dirname(root), { recursive: true, force: true });
+  });
+
+  it('backups are collision-safe across dirs with same-basename files', () => {
+    const oldAlpha = '-Users-joeblack-alpha';
+    const oldBeta = '-Users-joeblack-beta';
+    const dup = 'dup.jsonl';
+    seed(root, oldAlpha, dup, '/Users/joeblack/alpha');
+    seed(root, oldBeta, dup, '/Users/joeblack/beta');
+
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+    revertHomePaths({ baseDir });
+
+    const alphaRestored = parseTranscriptText(
+      readFileSync(path.join(root, oldAlpha, dup), 'utf8'),
+      dup,
+    );
+    const betaRestored = parseTranscriptText(
+      readFileSync(path.join(root, oldBeta, dup), 'utf8'),
+      dup,
+    );
+    expect(alphaRestored.cwd).toBe('/Users/joeblack/alpha');
+    expect(betaRestored.cwd).toBe('/Users/joeblack/beta');
+  });
+
+  it('archives rather than destroys prior manifest/journal/backups on a second apply', () => {
+    const first = migrateHomePaths({
+      from: FROM,
+      to: TO,
+      projectsRoot: root,
+      baseDir,
+      dryRun: false,
+    });
+    expect(first.dirMoves.length).toBeGreaterThan(0);
+    expect(first.rewrites.length).toBeGreaterThan(0);
+
+    migrateHomePaths({ from: FROM, to: TO, projectsRoot: root, baseDir, dryRun: false });
+
+    const archived = readdirSync(baseDir).filter(
+      (name) => name.startsWith(`${MANIFEST_NAME}.`) && name.endsWith('.bak'),
+    );
+    expect(archived.length).toBeGreaterThan(0);
+    const archivedName = archived[0];
+    if (archivedName === undefined) throw new Error('expected an archived manifest file');
+    const archivedManifest = JSON.parse(readFileSync(path.join(baseDir, archivedName), 'utf8')) as {
+      dirMoves: unknown[];
+      rewrites: unknown[];
+    };
+    expect(archivedManifest.dirMoves).toHaveLength(first.dirMoves.length);
+    expect(archivedManifest.rewrites).toHaveLength(first.rewrites.length);
   });
 });

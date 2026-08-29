@@ -8,8 +8,15 @@
 //      existing new-home dir when present (UUIDs are unique, so no filename clash), and
 //   2. in-transcript paths: rewrite `/Users/joeblack/…` → `/Users/joe/…` so tools that
 //      read `cwd` resolve into the live tree.
+//
+// Resilience: every destructive op (dir move, file merge, file rewrite) is individually
+// try/caught and appended to a `migrate-journal.jsonl` as it completes, so a throw partway
+// through a run never aborts the whole migration and never leaves zero record of what
+// happened — `revertHomePaths` can rebuild a manifest from the journal alone if the final
+// manifest write never happened.
 
 import {
+  appendFileSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -21,11 +28,13 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { atomicWrite } from '../surfaces/transcript-writer.js';
 import { parseTranscriptText } from '../transcript/parse.js';
 
 const DEFAULT_FROM = '/Users/joeblack';
 const DEFAULT_TO = '/Users/joe';
-const MANIFEST_NAME = 'migrate-manifest.json';
+export const MANIFEST_NAME = 'migrate-manifest.json';
+export const JOURNAL_NAME = 'migrate-journal.jsonl';
 const REWRITE_BACKUPS = 'migrate-backups';
 
 export interface MigrateOptions {
@@ -52,6 +61,21 @@ export interface FileRewrite {
   count: number;
 }
 
+const OP_BEGIN = 'begin';
+const OP_DIR_MOVE = 'dir-move';
+const OP_FILE_MERGE = 'file-merge';
+const OP_FILE_REWRITE = 'file-rewrite';
+const OP_FAILURE = 'failure';
+const OP_COMPLETE = 'complete';
+
+type FailureStage = typeof OP_DIR_MOVE | typeof OP_FILE_MERGE | typeof OP_FILE_REWRITE;
+
+export interface MigrateFailure {
+  stage: FailureStage;
+  target: string;
+  error: string;
+}
+
 export interface MigrateManifest {
   from: string;
   to: string;
@@ -59,7 +83,17 @@ export interface MigrateManifest {
   dirMoves: DirMove[];
   fileMerges: FileMerge[];
   rewrites: FileRewrite[];
+  /** Additive — absent or empty on a clean run; an old pre-fix manifest has no such field. */
+  failures?: MigrateFailure[];
 }
+
+type JournalEntry =
+  | { op: typeof OP_BEGIN; from: string; to: string; ts: number }
+  | { op: typeof OP_DIR_MOVE; from: string; to: string; ts: number }
+  | { op: typeof OP_FILE_MERGE; from: string; to: string; ts: number }
+  | { op: typeof OP_FILE_REWRITE; file: string; count: number; ts: number }
+  | { op: typeof OP_FAILURE; stage: FailureStage; target: string; error: string; ts: number }
+  | { op: typeof OP_COMPLETE; ts: number; failures: number };
 
 const encodeHome = (home: string): string => home.replaceAll('/', '-');
 
@@ -76,6 +110,71 @@ const defaults = (
   isDryRun: options.dryRun ?? true,
 });
 
+const journalPath = (baseDir: string): string => path.join(baseDir, JOURNAL_NAME);
+
+const appendJournal = (baseDir: string, entry: JournalEntry): void => {
+  appendFileSync(journalPath(baseDir), `${JSON.stringify(entry)}\n`);
+};
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+interface FailureSink {
+  baseDir: string;
+  isDryRun: boolean;
+  failures: MigrateFailure[];
+}
+
+/**
+ * Record a failed op: push it onto the in-memory `failures` list and, on an apply run, append
+ * a `failure` journal line. Shared by all three op sites (dir-move, file-merge, file-rewrite)
+ * so a mid-loop throw is handled identically everywhere and the loop it's called from can move
+ * on to the next item.
+ */
+const recordFailure = (
+  sink: FailureSink,
+  stage: FailureStage,
+  target: string,
+  error: unknown,
+): void => {
+  const message = errorMessage(error);
+  sink.failures.push({ stage, target, error: message });
+  if (!sink.isDryRun) {
+    appendJournal(sink.baseDir, { op: OP_FAILURE, stage, target, error: message, ts: Date.now() });
+  }
+};
+
+/**
+ * Backup location for a rewritten transcript, namespaced by the encoded slug of its source
+ * directory. Every rewrite target lives at `projectsRoot/<slug>/<file>` where `<slug>` never
+ * contains a literal `/` (it's itself a `/`→`-` encoding), and `projectsRoot` is fixed for the
+ * whole run, so `encodeHome(path.dirname(file))` is injective in `slug` — two distinct
+ * destination directories can never produce the same backup namespace regardless of basename
+ * collisions between them.
+ */
+const backupPathFor = (baseDir: string, file: string): string =>
+  path.join(baseDir, REWRITE_BACKUPS, encodeHome(path.dirname(file)), path.basename(file));
+
+/** Pre-fix flat backup layout, kept only so old backups remain revertable. */
+const legacyBackupPathFor = (baseDir: string, file: string): string =>
+  path.join(baseDir, REWRITE_BACKUPS, path.basename(file));
+
+/**
+ * Archive (never delete) any pre-existing manifest/journal/backups before a new apply run
+ * starts, so a second `--apply` can't destroy the first run's revert data.
+ */
+const archiveExistingRevertData = (baseDir: string): void => {
+  if (!existsSync(baseDir)) return;
+  const suffix = new Date().toISOString().replaceAll(/[.:]/g, '-');
+  const archive = (name: string): void => {
+    const src = path.join(baseDir, name);
+    if (existsSync(src)) renameSync(src, `${src}.${suffix}.bak`);
+  };
+  archive(MANIFEST_NAME);
+  archive(JOURNAL_NAME);
+  archive(REWRITE_BACKUPS);
+};
+
 /** Slug dirs under the old home, paired with their new-home destination. */
 const planDirectories = (projectsRoot: string, from: string, to: string): DirMove[] => {
   const slugFrom = encodeHome(from);
@@ -91,26 +190,47 @@ const planDirectories = (projectsRoot: string, from: string, to: string): DirMov
   return moves;
 };
 
-const mergeDir = (move: DirMove, isDryRun: boolean): FileMerge[] => {
+const mergeDir = (
+  move: DirMove,
+  isDryRun: boolean,
+  baseDir: string,
+  failures: MigrateFailure[],
+): FileMerge[] => {
   const merges: FileMerge[] = [];
   for (const file of readdirSync(move.from)) {
     const from = path.join(move.from, file);
     const to = path.join(move.to, file);
     const isCollision = existsSync(to);
     merges.push({ from, to, collision: isCollision });
-    if (!isDryRun && !isCollision) renameSync(from, to);
+    if (isDryRun || isCollision) continue;
+    try {
+      renameSync(from, to);
+      appendJournal(baseDir, { op: OP_FILE_MERGE, from, to, ts: Date.now() });
+    } catch (error) {
+      recordFailure({ baseDir, isDryRun, failures }, OP_FILE_MERGE, from, error);
+    }
   }
   if (!isDryRun && readdirSync(move.from).length === 0) rmdirSync(move.from);
   return merges;
 };
 
-const applyDirectories = (moves: readonly DirMove[], isDryRun: boolean): FileMerge[] => {
+const applyDirectories = (
+  moves: readonly DirMove[],
+  isDryRun: boolean,
+  baseDir: string,
+  failures: MigrateFailure[],
+): FileMerge[] => {
   const merges: FileMerge[] = [];
   for (const move of moves) {
     if (existsSync(move.to)) {
-      merges.push(...mergeDir(move, isDryRun));
+      merges.push(...mergeDir(move, isDryRun, baseDir, failures));
     } else if (!isDryRun) {
-      renameSync(move.from, move.to);
+      try {
+        renameSync(move.from, move.to);
+        appendJournal(baseDir, { op: OP_DIR_MOVE, from: move.from, to: move.to, ts: Date.now() });
+      } catch (error) {
+        recordFailure({ baseDir, isDryRun, failures }, OP_DIR_MOVE, move.from, error);
+      }
     }
   }
   return merges;
@@ -155,7 +275,7 @@ const rewriteFile = (
   if (count === 0 || isDryRun) return count;
 
   const origErrors = parseTranscriptText(text, file).parseErrors;
-  const backupPath = path.join(baseDir, REWRITE_BACKUPS, path.basename(file));
+  const backupPath = backupPathFor(baseDir, file);
   mkdirSync(path.dirname(backupPath), { recursive: true });
   if (!existsSync(backupPath)) copyFileSync(file, backupPath);
 
@@ -171,29 +291,67 @@ const rewriteFile = (
   return count;
 };
 
+const applyRewrites = (
+  targets: readonly string[],
+  rename: { from: string; to: string },
+  sink: FailureSink,
+): FileRewrite[] => {
+  const { baseDir, isDryRun } = sink;
+  const rewrites: FileRewrite[] = [];
+  for (const file of targets) {
+    try {
+      const count = rewriteFile(file, rename.from, rename.to, isDryRun, baseDir);
+      if (count > 0) {
+        rewrites.push({ file, count });
+        if (!isDryRun) {
+          appendJournal(baseDir, { op: OP_FILE_REWRITE, file, count, ts: Date.now() });
+        }
+      }
+    } catch (error) {
+      recordFailure(sink, OP_FILE_REWRITE, file, error);
+    }
+  }
+  return rewrites;
+};
+
 /** Run (or preview) the home-path migration. Dry-run by default. */
 export const migrateHomePaths = (options: MigrateOptions = {}): MigrateManifest => {
   const { from, to, projectsRoot, baseDir, isDryRun } = defaults(options);
-  const dirMoves = planDirectories(projectsRoot, from, to);
-  const fileMerges = applyDirectories(dirMoves, isDryRun);
 
-  const rewrites: FileRewrite[] = [];
-  for (const file of rewriteTargets(dirMoves, fileMerges, isDryRun)) {
-    const count = rewriteFile(file, from, to, isDryRun, baseDir);
-    if (count > 0) rewrites.push({ file, count });
+  if (!isDryRun) {
+    archiveExistingRevertData(baseDir);
+    mkdirSync(baseDir, { recursive: true });
+    appendJournal(baseDir, { op: OP_BEGIN, from, to, ts: Date.now() });
   }
 
-  const manifest: MigrateManifest = { from, to, dryRun: isDryRun, dirMoves, fileMerges, rewrites };
+  const dirMoves = planDirectories(projectsRoot, from, to);
+  const failures: MigrateFailure[] = [];
+  const fileMerges = applyDirectories(dirMoves, isDryRun, baseDir, failures);
+  const targets = rewriteTargets(dirMoves, fileMerges, isDryRun);
+  const rewrites = applyRewrites(targets, { from, to }, { baseDir, isDryRun, failures });
+
+  const manifest: MigrateManifest = {
+    from,
+    to,
+    dryRun: isDryRun,
+    dirMoves,
+    fileMerges,
+    rewrites,
+    failures,
+  };
   if (!isDryRun) {
-    mkdirSync(baseDir, { recursive: true });
-    writeFileSync(path.join(baseDir, MANIFEST_NAME), JSON.stringify(manifest, null, 2));
+    appendJournal(baseDir, { op: OP_COMPLETE, ts: Date.now(), failures: failures.length });
+    atomicWrite(path.join(baseDir, MANIFEST_NAME), JSON.stringify(manifest, null, 2));
   }
   return manifest;
 };
 
 const restoreRewrites = (manifest: MigrateManifest, baseDir: string): void => {
   for (const rewrite of manifest.rewrites) {
-    const backupPath = path.join(baseDir, REWRITE_BACKUPS, path.basename(rewrite.file));
+    const namespaced = backupPathFor(baseDir, rewrite.file);
+    const backupPath = existsSync(namespaced)
+      ? namespaced
+      : legacyBackupPathFor(baseDir, rewrite.file);
     if (existsSync(backupPath)) copyFileSync(backupPath, rewrite.file);
   }
 };
@@ -212,12 +370,77 @@ const restoreMoves = (manifest: MigrateManifest): void => {
   }
 };
 
-/** Reverse a previously-applied migration using its manifest. */
+interface JournalAccumulator {
+  dirMoves: DirMove[];
+  fileMerges: FileMerge[];
+  rewrites: FileRewrite[];
+}
+
+/** Fold one journal line into the in-progress manifest arrays; `failure`/`complete` are ignored. */
+const applyJournalLine = (line: JournalEntry, accumulator: JournalAccumulator): void => {
+  switch (line.op) {
+    case OP_DIR_MOVE: {
+      accumulator.dirMoves.push({ from: line.from, to: line.to });
+      break;
+    }
+    case OP_FILE_MERGE: {
+      accumulator.fileMerges.push({ from: line.from, to: line.to, collision: false });
+      break;
+    }
+    case OP_FILE_REWRITE: {
+      accumulator.rewrites.push({ file: line.file, count: line.count });
+      break;
+    }
+    default: {
+      break;
+    }
+  }
+};
+
+/**
+ * Rebuild a manifest from the append-only journal when the final manifest write never
+ * happened (killed mid-run). `begin` supplies `from`/`to`; `dir-move`/`file-merge`/
+ * `file-rewrite` lines populate the three arrays via `applyJournalLine`; `failure`/`complete`
+ * are ignored — no special-casing of partial-vs-complete is needed, since
+ * `restoreRewrites`/`restoreMerges`/`restoreMoves` are already idempotent and
+ * `existsSync`-guarded.
+ */
+const manifestFromJournal = (text: string): MigrateManifest => {
+  const lines = text
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => JSON.parse(line) as JournalEntry);
+  const begin = lines.find((line) => line.op === OP_BEGIN);
+  if (!begin) throw new Error('migrate journal is missing its begin entry');
+
+  const dirMoves: DirMove[] = [];
+  const fileMerges: FileMerge[] = [];
+  const rewrites: FileRewrite[] = [];
+  for (const line of lines) {
+    applyJournalLine(line, { dirMoves, fileMerges, rewrites });
+  }
+  return { from: begin.from, to: begin.to, dryRun: false, dirMoves, fileMerges, rewrites };
+};
+
+/** Manifest if it was written, else rebuilt from the journal, else undefined (neither exists). */
+const loadManifest = (baseDir: string): MigrateManifest | undefined => {
+  const manifestPath = path.join(baseDir, MANIFEST_NAME);
+  if (existsSync(manifestPath)) {
+    return JSON.parse(readFileSync(manifestPath, 'utf8')) as MigrateManifest;
+  }
+  const journalFile = journalPath(baseDir);
+  if (existsSync(journalFile)) {
+    return manifestFromJournal(readFileSync(journalFile, 'utf8'));
+  }
+  return undefined;
+};
+
+/** Reverse a previously-applied migration using its manifest, or its journal if the manifest
+ * write never completed. */
 export const revertHomePaths = (options: MigrateOptions = {}): MigrateManifest => {
   const { baseDir } = defaults(options);
-  const manifestPath = path.join(baseDir, MANIFEST_NAME);
-  if (!existsSync(manifestPath)) throw new Error(`no migration manifest at ${manifestPath}`);
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as MigrateManifest;
+  const manifest = loadManifest(baseDir);
+  if (!manifest) throw new Error(`no migration manifest or journal at ${baseDir}`);
 
   restoreRewrites(manifest, baseDir);
   restoreMerges(manifest);

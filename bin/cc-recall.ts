@@ -18,7 +18,7 @@ import {
   indexSession,
 } from '../src/engine.js';
 import { logSearchQuery, readAdoptionMetrics } from '../src/metrics/adoption.js';
-import { migrateHomePaths, revertHomePaths } from '../src/migrate/home-path.js';
+import { JOURNAL_NAME, migrateHomePaths, revertHomePaths } from '../src/migrate/home-path.js';
 import { verifyClaudeMemG0 } from '../src/surfaces/claude-mem.js';
 import { verifyDeployedPlugin } from '../src/surfaces/deploy-verify.js';
 import { defaultFrontPagePath, writeFrontPage } from '../src/surfaces/native-memory.js';
@@ -171,6 +171,12 @@ const runMigrate = (options: MigrateCliOptions): void => {
     `${manifest.dryRun ? 'DRY-RUN' : 'APPLIED'}: ${manifest.dirMoves.length} dir moves, ${manifest.fileMerges.length} merges, ${manifest.rewrites.length} rewrites`,
   );
   if (manifest.dryRun) out('re-run with --apply to perform the migration');
+  if (manifest.failures?.length) {
+    process.exitCode = 1;
+    err(
+      `migrate: ${manifest.failures.length} op(s) failed — see ${path.join(options.baseDir, JOURNAL_NAME)}`,
+    );
+  }
 };
 
 const runSearch = (query: string, options: SearchCliOptions): void => {
