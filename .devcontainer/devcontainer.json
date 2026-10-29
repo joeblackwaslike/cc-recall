@@ -5,48 +5,102 @@
     "ghcr.io/devcontainers/features/docker-in-docker:2": {
       "version": "latest",
       "enableNonRootDocker": "true",
-      "moby": true
+      "moby": false
     }
   },
   "customizations": {
     "vscode": {
       "extensions": [
-        "Anthropic.claude-code",
-        "alefragnani.Bookmarks",
+        "alefragnani.bookmarks",
+        "alefragnani.project-manager",
+        "anthropic.claude-code",
         "antfu.browse-lite",
+        "antfu.vite",
+        "atommaterial.a-file-icon-vscode",
+        "avifenesh.agnix",
+        "bierner.markdown-checkbox",
+        "bierner.markdown-emoji",
+        "bierner.markdown-footnotes",
+        "bierner.markdown-mermaid",
+        "bierner.markdown-preview-github-styles",
+        "bierner.markdown-yaml-preamble",
         "biomejs.biome",
+        "bradlc.vscode-tailwindcss",
+        "burkeholland.simple-react-snippets",
+        "charliermarsh.ruff",
         "christian-kohler.npm-intellisense",
-        "DavidAnson.vscode-markdownlint",
+        "davidanson.vscode-markdownlint",
         "dbaeumer.vscode-eslint",
         "denoland.vscode-deno",
         "donjayamanne.githistory",
-        "EditorConfig.EditorConfig",
+        "drblury.protobuf-vsc",
+        "eamodio.gitlens",
+        "editorconfig.editorconfig",
         "esbenp.prettier-vscode",
+        "fill-labs.dependi",
+        "frhtylcn.pythonsnippets",
+        "gabor.jsonl-gazelle",
+        "github.github-vscode-theme",
         "github.vscode-github-actions",
-        "GitHub.vscode-pull-request-github",
+        "github.vscode-pull-request-github",
         "golang.go",
-        "Jacano.vscode-pnpm",
+        "gruntfuggly.todo-tree",
+        "jacano.vscode-pnpm",
+        "jannchie.ruff-ignore-explainer",
+        "jscearcy.rust-doc-viewer",
+        "kaih2o.python-resource-monitor",
+        "kevinrose.vsc-python-indent",
+        "lextudio.restructuredtext",
+        "listadev.lista-beads",
+        "mametora.vscode-jsonl-viewer",
+        "matt-meyers.vscode-dbml",
+        "mechatroner.rainbow-csv",
         "mhutchie.git-graph",
         "ms-azuretools.vscode-containers",
+        "ms-kubernetes-tools.vscode-kubernetes-tools",
+        "ms-python.debugpy",
         "ms-python.python",
         "ms-python.vscode-pylance",
-        "ms-vscode.makefile-tools",
-        "ms-vscode.vscode-typescript-next",
+        "ms-python.vscode-python-envs",
+        "ms-toolsai.jupyter",
+        "ms-toolsai.jupyter-keymap",
+        "ms-toolsai.jupyter-renderers",
+        "ms-toolsai.vscode-jupyter-cell-tags",
+        "ms-toolsai.vscode-jupyter-slideshow",
         "ms-vscode-remote.remote-containers",
+        "ms-vscode.vscode-speech",
+        "ms-vscode.vscode-typescript-next",
+        "mtxr.sqltools",
+        "mtxr.sqltools-driver-mysql",
+        "mtxr.sqltools-driver-pg",
+        "openai.chatgpt",
         "oven.bun-vscode",
+        "pkief.material-product-icons",
+        "qwenlm.qwen-code-vscode-ide-companion",
+        "randomfractalsinc.vscode-data-preview",
+        "redhat.extester-runner",
+        "redhat.vscode-xml",
+        "redhat.vscode-yaml",
+        "redis.redis-for-vscode",
         "reduckted.vscode-gitweblinks",
+        "reecepbcups.run-code-block",
         "remcohaszing.schemastore",
         "rust-lang.rust-analyzer",
-        "sst-dev.opencode",
-        "Supabase.vscode-supabase-extension",
+        "samuelcolvin.jinjahtml",
+        "sanjulaganepola.github-local-actions",
+        "sonarsource.sonarlint-vscode",
+        "sst-dev.opencode-v2",
+        "supermaven.supermaven",
         "tamasfe.even-better-toml",
-        "bradlc.vscode-tailwindcss",
-        "antfu.vite",
-        "bierner.markdown-checkbox",
-        "bierner.markdown-emoji",
-        "bierner.markdown-preview-github-styles",
+        "timonwong.shellcheck",
+        "tintinweb.graphviz-interactive-preview",
+        "tomoki1207.pdf",
+        "trond-snekvik.simple-rst",
+        "vsls-contrib.gistfs",
+        "vstirbu.vscode-mermaid-preview",
+        "willasm.obsidian-md-vsc",
         "wilsonsio.color-vision",
-        "yoavbls.pretty-ts-errors"
+        "zhouronghui.propertylist"
       ]
     }
   },
@@ -54,8 +108,6 @@
     // Claude Code config (writable — Claude writes sessions, memory, cache)
     "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
     "source=${localEnv:HOME}/.claude.json,target=/home/vscode/.claude.json,type=bind,consistency=cached",
-    // OpenAI Codex CLI
-    "source=${localEnv:HOME}/.cpdex,target=/home/vscode/.codex,type=bind,consistency=cached",
     // Skills + agents (read-only — managed in ~/.agents on host)
     "source=${localEnv:HOME}/.agents,target=/home/vscode/.agents,type=bind,readonly,consistency=cached",
     // Shell / git identity (read-only)
@@ -66,17 +118,24 @@
     // Local repos (read-only) — makes MCP server paths from settings.json resolve
     // via the /Users/joe → /home/vscode symlink added in the Dockerfile
     "source=${localEnv:HOME}/github/joeblackwaslike,target=/home/vscode/github/joeblackwaslike,type=bind,readonly,consistency=cached",
-    // opencode (read-only — managed on host)
-    "source=${localEnv:HOME}/.config/opencode,target=/home/vscode/.config/opencode,type=bind,readonly,consistency=cached",
-    "source=${localEnv:HOME}/.local/share/opencode,target=/home/vscode/.local/share/opencode,type=bind,readonly,consistency=cached",
+    // opencode (config + runtime data writable; install dir read-only)
+    "source=${localEnv:HOME}/.config/opencode,target=/home/vscode/.config/opencode,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/.local/share/opencode,target=/home/vscode/.local/share/opencode,type=bind,consistency=cached",
     // Gemini CLI (writable — writes session history, settings, state)
     "source=${localEnv:HOME}/.gemini,target=/home/vscode/.gemini,type=bind,consistency=cached",
+    // OpenAI Codex CLI / openclaw (writable — writes memories, skills, session logs, state)
+    "source=${localEnv:HOME}/.codex,target=/home/vscode/.codex,type=bind,consistency=cached",
     // openclaw identity + workspace (writable — writes credentials, logs, workspace state)
     "source=${localEnv:HOME}/.openclaw,target=/home/vscode/.openclaw,type=bind,consistency=cached",
+    // Bun + pnpm caches (read-write) -- shared with the host so installs are warm in the container
+    "source=${localEnv:HOME}/.bun/install/cache,target=/home/vscode/.bun/install/cache,type=bind,consistency=cached",
+    "source=${localEnv:HOME}/Library/pnpm/store,target=/home/vscode/.local/share/pnpm/store,type=bind,consistency=cached",
     // Docker socket (OrbStack on macOS)
     "source=${localEnv:HOME}/.orbstack/run/docker.sock,target=/var/run/docker.sock,type=bind,consistency=cached"
   ],
   "remoteEnv": {
+    // Registry auth for pnpm/bun (reference it from .npmrc as ${NPM_TOKEN})
+    "NPM_TOKEN": "${localEnv:NPM_TOKEN}",
     // Anthropic / Claude
     "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
     "ANTHROPIC_MODEL": "${localEnv:ANTHROPIC_MODEL}",
@@ -86,9 +145,7 @@
     // OpenAI / Codex
     "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}",
     "OPENAI_ORG_ID": "${localEnv:OPENAI_ORG_ID}",
-    // 1Password CLI — no mountable socket on this host; use service account token instead.
-    // Generate one at https://developer.1password.com/docs/service-accounts/
-    // then export OP_SERVICE_ACCOUNT_TOKEN in your shell before opening the container.
+    // 1Password CLI — service account token (no socket on macOS host)
     "OP_SERVICE_ACCOUNT_TOKEN": "${localEnv:OP_SERVICE_ACCOUNT_TOKEN}",
     // MCP server API keys
     "CONTEXT7_API_KEY": "${localEnv:CONTEXT7_API_KEY}",
@@ -101,6 +158,8 @@
     // opencode
     "OPENCODE_AGENT_SKILLS_SUPERPOWERS_MODE": "true"
   },
+  // Bind-mount sources must exist on the host or the container will not start
+  "initializeCommand": "mkdir -p \"$HOME/.bun/install/cache\" \"$HOME/Library/pnpm/store\"",
   "postCreateCommand": "/usr/local/share/devcontainer/scripts/setup.sh",
   "postAttachCommand": "/usr/local/share/devcontainer/scripts/discover-deps.sh"
 }
