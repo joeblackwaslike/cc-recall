@@ -4,6 +4,10 @@ description: Install Node.js and pnpm dependencies
 runs:
   using: composite
   steps:
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version-file: .bun-version
+
     - name: Setup pnpm
       uses: pnpm/action-setup@v4
 

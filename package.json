@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc",
     "release:manifest": "node scripts/generate-release-manifest.mjs",
-    "dev": "tsx src/index.ts",
+    "dev": "bun src/index.ts",
     "test": "vitest",
     "test:watch": "vitest --watch",
     "test:coverage": "vitest --coverage",
@@ -40,7 +40,7 @@
     "eslint-plugin-unicorn": "^68.0.0",
     "husky": "^9.1.7",
     "lint-staged": "^17.0.8",
-    "tsx": "^4.19.2",
+    "tsx": "^4.22.4",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.32.1",
     "vitest": "^3.0.0"
