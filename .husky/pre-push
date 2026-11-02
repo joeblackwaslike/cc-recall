@@ -1,1 +1,17 @@
-if command -v bd >/dev/null 2>&1; then bd hooks run pre-push "$@"; fi
+set -e
+
+command -v bd >/dev/null 2>&1 && bd hooks run pre-push "$@" || true
+
+pnpm exec biome ci .
+pnpm typecheck
+
+base=$(git rev-parse -q --verify '@{upstream}' || git rev-parse -q --verify origin/main || true)
+if [ -z "$base" ] || ! git diff --quiet "$base"...HEAD -- eslint.config.mjs tsconfig.json package.json pnpm-lock.yaml; then
+  pnpm exec eslint . --max-warnings=0
+  exit 0
+fi
+
+# ponytail: with no config change, lints only files changed since the merge-base; a type
+# change can surface typed-rule errors in an unchanged file, which CI's full `eslint .` catches.
+git diff -z --name-only --diff-filter=d "$base"...HEAD -- '*.ts' '*.tsx' '*.mts' '*.cts' '*.js' '*.jsx' '*.mjs' '*.cjs' |
+  xargs -0 -r pnpm exec eslint --max-warnings=0 --no-warn-ignored
