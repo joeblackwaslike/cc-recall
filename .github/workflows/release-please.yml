@@ -78,9 +78,6 @@ jobs:
 
       - name: Force-push plugin snapshot to release branch
         run: |
-          jq 'del(.hooks.SessionStart)' hooks/hooks.json > /tmp/hooks.json
-          mv /tmp/hooks.json hooks/hooks.json
-          rm -f hooks/ensure-built.sh hooks/ensure-built.test.sh hooks/deploy-verify.mjs hooks/deploy-verify.test.ts
           node scripts/generate-release-manifest.mjs
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
