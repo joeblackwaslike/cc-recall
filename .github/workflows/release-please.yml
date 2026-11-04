@@ -54,6 +54,9 @@ jobs:
 
   publish-plugin-branch:
     name: Publish prebuilt plugin to release branch
+    concurrency:
+      group: publish-plugin-branch
+      cancel-in-progress: false
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created }}
     runs-on: ubuntu-latest
@@ -78,6 +81,7 @@ jobs:
           jq 'del(.hooks.SessionStart)' hooks/hooks.json > /tmp/hooks.json
           mv /tmp/hooks.json hooks/hooks.json
           rm -f hooks/ensure-built.sh hooks/ensure-built.test.sh hooks/deploy-verify.mjs hooks/deploy-verify.test.ts
+          node scripts/generate-release-manifest.mjs
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout --orphan release
