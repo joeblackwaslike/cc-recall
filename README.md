@@ -34,7 +34,7 @@ claude plugin marketplace add joeblackwaslike/agent-marketplace
 claude plugin install cc-recall
 ```
 
-The plugin auto-builds on first session start via a `SessionStart` hook — no manual build step needed.
+The plugin ships a prebuilt bundle — no build step needed.
 
 ## Usage
 

@@ -90,7 +90,7 @@ if (!transcriptPath || !pluginRoot) {
   // One actionable line beats thousands of identical traces.
   if (!existsSync(cli)) {
     process.stderr.write(
-      `cc-recall session-end: ${cli} is missing, so this session was not indexed. The SessionStart build likely failed — see ${path.join(baseDir, 'logs', 'build.log')}.\n`,
+      `cc-recall session-end: ${cli} is missing, so this session was not indexed. The plugin install is missing its prebuilt bundle; reinstall or update cc-recall.\n`,
     );
     proceed();
     process.exit(0);
