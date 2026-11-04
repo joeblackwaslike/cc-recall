@@ -81,7 +81,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout --orphan release
-          git rm -r -q --cached .
+          git rm -r -q -f --cached .
           git add -f .claude-plugin hooks commands skills dist package.json LICENSE README.md
           git commit -m "release: prebuilt plugin snapshot of ${GITHUB_SHA}"
           git push --force origin release
