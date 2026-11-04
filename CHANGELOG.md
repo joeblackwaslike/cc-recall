@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.5.0...cc-recall-v0.5.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* **hooks:** drop SessionStart ensure-built and deploy-verify hooks ([#88](https://github.com/joeblackwaslike/cc-recall/issues/88)) ([6b3ce8e](https://github.com/joeblackwaslike/cc-recall/commit/6b3ce8e5c84be0dac372f97fecd21d91878915d0))
+
 ## [0.5.0](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.4.1...cc-recall-v0.5.0) (2026-11-04)
 
 
