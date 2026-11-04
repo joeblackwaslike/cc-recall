@@ -25,13 +25,15 @@
     "typecheck": "node node_modules/typescript7/bin/tsc --noEmit",
     "check": "pnpm typecheck && pnpm lint",
     "depcheck": "depcheck",
-    "prepare": "husky"
+    "prepare": "husky",
+    "bundle:plugin": "bash scripts/bundle-plugin.sh"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@types/node": "^26.0.0",
     "@vitest/coverage-v8": "^3.0.0",
     "depcheck": "^1.4.7",
+    "esbuild": "^0.28.2",
     "eslint": "^10.5.0",
     "eslint-import-resolver-typescript": "^4.4.5",
     "eslint-plugin-import-x": "^4.12.2",

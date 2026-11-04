@@ -51,3 +51,41 @@ jobs:
       - run: pnpm publish --access public --provenance --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-plugin-branch:
+    name: Publish prebuilt plugin to release branch
+    concurrency:
+      group: publish-plugin-branch
+      cancel-in-progress: false
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm bundle:plugin
+
+      - name: Force-push plugin snapshot to release branch
+        run: |
+          jq 'del(.hooks.SessionStart)' hooks/hooks.json > /tmp/hooks.json
+          mv /tmp/hooks.json hooks/hooks.json
+          rm -f hooks/ensure-built.sh hooks/ensure-built.test.sh hooks/deploy-verify.mjs hooks/deploy-verify.test.ts
+          node scripts/generate-release-manifest.mjs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan release
+          git rm -r -q -f --cached .
+          git add -f .claude-plugin hooks commands skills dist package.json LICENSE README.md
+          git commit -m "release: prebuilt plugin snapshot of ${GITHUB_SHA}"
+          git push --force origin release
