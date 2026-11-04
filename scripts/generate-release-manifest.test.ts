@@ -46,16 +46,14 @@ describe('buildManifest', () => {
     );
   });
 
-  it('hashes hooks/*.mjs and hooks/ensure-built.sh, keyed with a hooks/ prefix', () => {
+  it('hashes hooks/*.mjs, keyed with a hooks/ prefix', () => {
     writeFileSync(path.join(hooksDir, 'session-end.mjs'), MODULE_CONTENT);
-    writeFileSync(path.join(hooksDir, 'ensure-built.sh'), '#!/usr/bin/env bash\necho hi\n');
     writeFileSync(path.join(hooksDir, 'hooks.json'), '{}');
     writeFileSync(path.join(hooksDir, 'session-end.test.ts'), 'it.todo("x");');
 
     const manifest = buildManifest(distributionDir, hooksDir, '1.2.3');
 
     expect(Object.keys(manifest.files).toSorted((a, b) => a.localeCompare(b))).toEqual([
-      'hooks/ensure-built.sh',
       'hooks/session-end.mjs',
     ]);
     expect(manifest.files['hooks/session-end.mjs']).toBe(

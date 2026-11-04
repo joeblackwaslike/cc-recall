@@ -20,7 +20,7 @@
 // `release:manifest` split in package.json.
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -53,9 +53,6 @@ export const buildManifest = (distributionDir, hooksDir, version) => {
   }
 
   const hookRelativePaths = walkFiles(hooksDir, (name) => name.endsWith('.mjs'));
-  if (existsSync(path.join(hooksDir, 'ensure-built.sh'))) {
-    hookRelativePaths.push('ensure-built.sh');
-  }
   for (const relativePath of hookRelativePaths) {
     files[path.join('hooks', relativePath)] = hashFile(path.join(hooksDir, relativePath));
   }
