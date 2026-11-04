@@ -12,9 +12,10 @@
 // CRITICAL -- release-only, never a local-build step:
 // This script MUST ONLY be invoked by an actual release/publish process running from a clean,
 // authoritative checkout (CI). It must NEVER be wired into `pnpm build`, and must never run as
-// part of any locally-triggered rebuild, a developer's local `pnpm build`, etc. If a local rebuild regenerates this manifest
-// from whatever happens to be on disk, the manifest becomes tautologically self-consistent with
-// a possibly stale/partial/corrupted state, and the deploy self-verification feature this file
+// part of any locally-triggered rebuild, a developer's local `pnpm build`, etc. If a local
+// rebuild regenerates this manifest from whatever happens to be on disk, the manifest becomes
+// tautologically self-consistent with a possibly stale/partial/corrupted state, and the deploy
+// self-verification feature this file
 // exists to support would silently PASS on exactly the corrupted-deploy scenario it's meant to
 // catch. Found in PR #77 review (chatgpt-codex-connector, P1) -- see the `build` vs
 // `release:manifest` split in package.json.
