@@ -1,0 +1,9 @@
+{
+  "version": "0.5.1",
+  "generatedAt": "2026-11-04T02:51:05.573Z",
+  "files": {
+    "dist/bin/cc-recall.js": "ea51949519a5d34992928a882b0295607ca5ea61dadd3c4b3428224532c9ec9e",
+    "hooks/prompt-submit.mjs": "5b1b92684a656e972fca8fd8f2050ce4de227e293886b76a5eb336ba28d68921",
+    "hooks/session-end.mjs": "40ed08b64c37588d48f6c209364cc71ce347183aff24d3b8493747d5a9b53b93"
+  }
+}
