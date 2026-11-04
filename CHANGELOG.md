@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.4.1...cc-recall-v0.5.0) (2026-11-04)
+
+
+### Features
+
+* **release:** publish prebuilt plugin bundle to release branch ([#87](https://github.com/joeblackwaslike/cc-recall/issues/87)) ([ed0a8f6](https://github.com/joeblackwaslike/cc-recall/commit/ed0a8f61353fb293af6a3b2e1cce6c03d29a6e9a))
+
+
+### Bug Fixes
+
+* **engine:** sidecar coverage regression — m32 retry starvation + garbage project dirs ([#80](https://github.com/joeblackwaslike/cc-recall/issues/80)) ([91c33ee](https://github.com/joeblackwaslike/cc-recall/commit/91c33ee87d2378239f62fabf773c5d5d745f0270))
+* **migrate:** journal per-op resilience, atomic manifest, collision-safe backups ([#82](https://github.com/joeblackwaslike/cc-recall/issues/82)) ([c46c616](https://github.com/joeblackwaslike/cc-recall/commit/c46c616e3ba674dabcc2370fa00dc146e7a9d310))
+
+
+### Performance Improvements
+
+* **ci:** add TypeScript 7 typecheck, pre-push gate, and branch-only cancel ([#86](https://github.com/joeblackwaslike/cc-recall/issues/86)) ([aec592d](https://github.com/joeblackwaslike/cc-recall/commit/aec592d291048c85efb28c156ae0443589ba16f7))
+
 ## [0.4.1](https://github.com/joeblackwaslike/cc-recall/compare/cc-recall-v0.4.0...cc-recall-v0.4.1) (2026-08-17)
 
 
