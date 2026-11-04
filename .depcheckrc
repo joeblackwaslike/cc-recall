@@ -2,6 +2,7 @@
   "ignores": [
     "@vitest/coverage-v8",
     "eslint-import-resolver-typescript",
+    "esbuild",
     "tsx"
   ]
 }
